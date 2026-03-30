@@ -98,7 +98,9 @@ pub mod error;
 pub mod event;
 pub mod event_data;
 pub mod parser;
+pub mod pcr;
 pub mod types;
+pub mod warning;
 
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
@@ -109,7 +111,9 @@ pub use event_data::{
     UefiFirmwareBlob2, UefiHandoffTables, UefiImageLoadEvent, UefiVariableData,
 };
 pub use parser::{EventDataParser, TcgLogParser};
+pub use pcr::PcrBank;
 pub use types::{EventType, Guid, HashAlgorithmId, to_hex};
+pub use warning::ParseWarning;
 
 // ── Test helpers (public so doc-tests in other modules can use them) ──────────
 
@@ -124,7 +128,9 @@ pub mod tests {
     /// The log contains:
     /// 1. A TCG 1.2-format header event carrying a `SpecIdEvent` that
     ///    advertises SHA-256 as the only algorithm.
-    /// 2. A single `EV_NO_ACTION` `StartupLocality` event (locality = 3).
+    /// 2. A single `EV_NO_ACTION` `StartupLocality` event (locality = 3,
+    ///    H-CRTM).  Per TCG PFP §3.3.2, this causes PCR 0 to be initialised
+    ///    to all `0xFF` bytes in the emulated PCR table.
     ///
     /// # Examples
     ///
@@ -137,6 +143,8 @@ pub mod tests {
     /// assert!(log.spec_id.is_some());
     /// assert_eq!(log.events.len(), 1);
     /// assert_eq!(log.events[0].digests[0].hash_alg, HashAlgorithmId::Sha256);
+    /// // Locality 3 → PCR 0 starts at all 0xFF.
+    /// assert_eq!(log.pcr_tables[0].pcrs[&0], "ff".repeat(32));
     /// ```
     pub fn minimal_tcg2_log() -> Vec<u8> {
         // ── SpecID event data ──────────────────────────────────────────────
@@ -249,6 +257,60 @@ pub mod tests {
         ev_data.extend_from_slice(&0x100000u64.to_le_bytes());   // length
 
         append_tcg2_event(&mut log, 0, 0x80000008, &[(0x000B, 32)], &ev_data);
+        log
+    }
+
+    /// Builds a TCG 2.0 log with the `StartupLocality` event set to a
+    /// specific locality.
+    ///
+    /// Use this to test the two PCR 0 initialisation cases defined by
+    /// TCG PFP §3.3.2:
+    ///
+    /// | `locality` | PCR 0 initial value |
+    /// |---|---|
+    /// | 0 | all `0x00` |
+    /// | 3 or 4 (H-CRTM) | all `0xFF` |
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tcglog_parser::TcgLogParser;
+    ///
+    /// // Locality 0: PCR 0 starts at zeros.
+    /// let log0 = TcgLogParser::new()
+    ///     .parse(&tcglog_parser::tests::tcg2_log_with_locality(0))
+    ///     .unwrap();
+    /// assert_eq!(log0.pcr_tables[0].pcrs[&0], "0".repeat(64));
+    ///
+    /// // Locality 3 (H-CRTM): PCR 0 starts at all 0xFF.
+    /// let log3 = TcgLogParser::new()
+    ///     .parse(&tcglog_parser::tests::tcg2_log_with_locality(3))
+    ///     .unwrap();
+    /// assert_eq!(log3.pcr_tables[0].pcrs[&0], "ff".repeat(32));
+    ///
+    /// // Locality 4 (H-CRTM variant): same as locality 3.
+    /// let log4 = TcgLogParser::new()
+    ///     .parse(&tcglog_parser::tests::tcg2_log_with_locality(4))
+    ///     .unwrap();
+    /// assert_eq!(log4.pcr_tables[0].pcrs[&0], "ff".repeat(32));
+    /// ```
+    pub fn tcg2_log_with_locality(locality: u8) -> Vec<u8> {
+        let spec_id_data = spec_id_bytes(&[(0x000B, 32)]);
+        let mut log = first_event_bytes(&spec_id_data);
+
+        // StartupLocality EV_NO_ACTION event.
+        let mut startup_data = Vec::new();
+        startup_data.extend_from_slice(b"StartupLocality\0");
+        startup_data.push(locality);
+
+        log.extend_from_slice(&0u32.to_le_bytes()); // pcr_index
+        log.extend_from_slice(&3u32.to_le_bytes()); // EV_NO_ACTION
+        log.extend_from_slice(&1u32.to_le_bytes()); // digest_count
+        log.extend_from_slice(&0x000Bu16.to_le_bytes()); // SHA-256 alg id
+        log.extend_from_slice(&[0u8; 32]);               // digest (zeros — EV_NO_ACTION)
+        log.extend_from_slice(&(startup_data.len() as u32).to_le_bytes());
+        log.extend_from_slice(&startup_data);
+
         log
     }
 

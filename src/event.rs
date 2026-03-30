@@ -1,6 +1,8 @@
 //! Core event structures for TCG 1.2 and TCG 2.0 event logs.
 
+use crate::pcr::PcrBank;
 use crate::types::{EventType, HashAlgorithmId, to_hex};
+use crate::warning::ParseWarning;
 use serde::{Deserialize, Serialize};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -73,6 +75,10 @@ impl DigestValue {
 /// parsed event payload.  Built-in parsers handle the most common UEFI event
 /// types; custom parsers can be registered via
 /// [`TcgLogParser::with_parser`](crate::TcgLogParser::with_parser).
+///
+/// Any non-fatal spec violations detected while parsing this event are
+/// collected in the `warnings` field and do not prevent the event from
+/// being included in the parsed log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcgPcrEvent2 {
     /// Index of the TPM Platform Configuration Register (PCR) extended.
@@ -85,6 +91,12 @@ pub struct TcgPcrEvent2 {
     /// unrecognised event types the value is a JSON object with a single
     /// `"raw"` field containing a hex string.
     pub event_data: serde_json::Value,
+    /// Non-fatal spec violations detected for this event.
+    ///
+    /// An empty list means the event appears fully conformant.  Callers
+    /// should treat any non-empty list as a signal that the log may deviate
+    /// from the TCG PC Client Platform Firmware Profile Specification.
+    pub warnings: Vec<ParseWarning>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -101,8 +113,16 @@ pub struct TcgPcrEvent2 {
 /// SpecID event (if the log is in TCG 2.0 format), and `events` holds all
 /// subsequent events in the crypto-agile format.
 ///
-/// For legacy TCG 1.2-only logs (no SpecID header), `spec_id` will be `None`
-/// and `events` will be empty; the header event is the only event.
+/// For legacy TCG 1.2-only logs (no SpecID header), `spec_id` will be `None`,
+/// `events` will be empty, and `pcr_tables` will be empty.
+///
+/// # PCR tables
+///
+/// The `pcr_tables` field contains one [`PcrBank`] per active hash algorithm.
+/// Each bank holds the emulated PCR values computed by replaying all events
+/// through the PCR extension formula `PCR_new = H(PCR_old || digest)`.
+/// PCRs start at all-zero bytes and are updated for every non-`EV_NO_ACTION`
+/// event.
 ///
 /// # JSON output
 ///
@@ -123,8 +143,12 @@ pub struct TcgPcrEvent2 {
 /// let log = TcgLogParser::new().parse(&raw).unwrap();
 ///
 /// assert!(log.spec_id.is_some());
+/// // PCR tables are present with one bank (SHA-256).
+/// assert_eq!(log.pcr_tables.len(), 1);
+/// // JSON output is valid.
 /// let json = serde_json::to_string_pretty(&log).unwrap();
 /// assert!(json.contains("sha256"));
+/// assert!(json.contains("pcr_tables"));
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcgLog {
@@ -138,4 +162,9 @@ pub struct TcgLog {
     ///
     /// Empty for legacy TCG 1.2-only logs.
     pub events: Vec<TcgPcrEvent2>,
+    /// Emulated PCR tables, one per active hash algorithm.
+    ///
+    /// Each bank holds the final PCR values after replaying all events.
+    /// Empty for legacy TCG 1.2-only logs (no SpecID, no algorithm list).
+    pub pcr_tables: Vec<PcrBank>,
 }
