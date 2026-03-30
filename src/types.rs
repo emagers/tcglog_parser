@@ -14,6 +14,12 @@ pub enum HashAlgorithmId {
     Sha512,
     /// SM3-256 (32-byte digest). Algorithm ID `0x0012`.
     Sm3_256,
+    /// SHA3-256 (32-byte digest). Algorithm ID `0x0027`.
+    Sha3_256,
+    /// SHA3-384 (48-byte digest). Algorithm ID `0x0028`.
+    Sha3_384,
+    /// SHA3-512 (64-byte digest). Algorithm ID `0x0029`.
+    Sha3_512,
     /// An algorithm ID not recognised by this library.
     Unknown(u16),
 }
@@ -37,6 +43,9 @@ impl HashAlgorithmId {
             0x000C => Self::Sha384,
             0x000D => Self::Sha512,
             0x0012 => Self::Sm3_256,
+            0x0027 => Self::Sha3_256,
+            0x0028 => Self::Sha3_384,
+            0x0029 => Self::Sha3_512,
             other => Self::Unknown(other),
         }
     }
@@ -58,6 +67,9 @@ impl HashAlgorithmId {
             Self::Sha384 => 0x000C,
             Self::Sha512 => 0x000D,
             Self::Sm3_256 => 0x0012,
+            Self::Sha3_256 => 0x0027,
+            Self::Sha3_384 => 0x0028,
+            Self::Sha3_512 => 0x0029,
             Self::Unknown(id) => id,
         }
     }
@@ -82,6 +94,9 @@ impl HashAlgorithmId {
             Self::Sha384 => Some(48),
             Self::Sha512 => Some(64),
             Self::Sm3_256 => Some(32),
+            Self::Sha3_256 => Some(32),
+            Self::Sha3_384 => Some(48),
+            Self::Sha3_512 => Some(64),
             Self::Unknown(_) => None,
         }
     }
@@ -103,6 +118,9 @@ impl HashAlgorithmId {
             Self::Sha384 => "sha384".to_string(),
             Self::Sha512 => "sha512".to_string(),
             Self::Sm3_256 => "sm3_256".to_string(),
+            Self::Sha3_256 => "sha3_256".to_string(),
+            Self::Sha3_384 => "sha3_384".to_string(),
+            Self::Sha3_512 => "sha3_512".to_string(),
             Self::Unknown(id) => format!("unknown({:#06x})", id),
         }
     }
@@ -126,6 +144,9 @@ impl From<String> for HashAlgorithmId {
             "sha384" => Self::Sha384,
             "sha512" => Self::Sha512,
             "sm3_256" => Self::Sm3_256,
+            "sha3_256" => Self::Sha3_256,
+            "sha3_384" => Self::Sha3_384,
+            "sha3_512" => Self::Sha3_512,
             other => {
                 // Try to recover the numeric value from "unknown(0xXXXX)".
                 parse_unknown_u16(other).map_or(Self::Unknown(0), Self::Unknown)
@@ -202,6 +223,10 @@ pub enum EventType {
     EfiFirmwareBlob2,
     /// `EV_EFI_HANDOFF_TABLES2` (0x8000000B) – EFI handoff tables v2.
     EfiHandoffTables2,
+    /// `EV_EFI_VARIABLE_BOOT2` (0x8000000C) – EFI boot variable v2.
+    EfiVariableBoot2,
+    /// `EV_EFI_HCRTM_EVENT` (0x80000010) – EFI H-CRTM event.
+    EfiHcrtmEvent,
     /// `EV_EFI_VARIABLE_AUTHORITY` (0x800000E0) – EFI variable authority.
     EfiVariableAuthority,
     /// `EV_EFI_SPDM_FIRMWARE_BLOB` (0x800000E1) – EFI SPDM firmware blob.
@@ -256,6 +281,8 @@ impl EventType {
             0x80000009 => Self::EfiHandoffTables,
             0x8000000A => Self::EfiFirmwareBlob2,
             0x8000000B => Self::EfiHandoffTables2,
+            0x8000000C => Self::EfiVariableBoot2,
+            0x80000010 => Self::EfiHcrtmEvent,
             0x800000E0 => Self::EfiVariableAuthority,
             0x800000E1 => Self::EfiSpdmFirmwareBlob,
             0x800000E2 => Self::EfiSpdmFirmwareConfig,
@@ -305,6 +332,8 @@ impl EventType {
             Self::EfiHandoffTables => 0x80000009,
             Self::EfiFirmwareBlob2 => 0x8000000A,
             Self::EfiHandoffTables2 => 0x8000000B,
+            Self::EfiVariableBoot2 => 0x8000000C,
+            Self::EfiHcrtmEvent => 0x80000010,
             Self::EfiVariableAuthority => 0x800000E0,
             Self::EfiSpdmFirmwareBlob => 0x800000E1,
             Self::EfiSpdmFirmwareConfig => 0x800000E2,
@@ -355,6 +384,8 @@ impl EventType {
             Self::EfiHandoffTables => "EV_EFI_HANDOFF_TABLES".to_string(),
             Self::EfiFirmwareBlob2 => "EV_EFI_PLATFORM_FIRMWARE_BLOB2".to_string(),
             Self::EfiHandoffTables2 => "EV_EFI_HANDOFF_TABLES2".to_string(),
+            Self::EfiVariableBoot2 => "EV_EFI_VARIABLE_BOOT2".to_string(),
+            Self::EfiHcrtmEvent => "EV_EFI_HCRTM_EVENT".to_string(),
             Self::EfiVariableAuthority => "EV_EFI_VARIABLE_AUTHORITY".to_string(),
             Self::EfiSpdmFirmwareBlob => "EV_EFI_SPDM_FIRMWARE_BLOB".to_string(),
             Self::EfiSpdmFirmwareConfig => "EV_EFI_SPDM_FIRMWARE_CONFIG".to_string(),
@@ -402,6 +433,8 @@ impl From<String> for EventType {
             "EV_EFI_HANDOFF_TABLES" => Self::EfiHandoffTables,
             "EV_EFI_PLATFORM_FIRMWARE_BLOB2" => Self::EfiFirmwareBlob2,
             "EV_EFI_HANDOFF_TABLES2" => Self::EfiHandoffTables2,
+            "EV_EFI_VARIABLE_BOOT2" => Self::EfiVariableBoot2,
+            "EV_EFI_HCRTM_EVENT" => Self::EfiHcrtmEvent,
             "EV_EFI_VARIABLE_AUTHORITY" => Self::EfiVariableAuthority,
             "EV_EFI_SPDM_FIRMWARE_BLOB" => Self::EfiSpdmFirmwareBlob,
             "EV_EFI_SPDM_FIRMWARE_CONFIG" => Self::EfiSpdmFirmwareConfig,
@@ -555,7 +588,7 @@ mod tests {
 
     #[test]
     fn hash_algorithm_id_round_trip() {
-        for &id in &[0x0004u16, 0x000B, 0x000C, 0x000D, 0x0012] {
+        for &id in &[0x0004u16, 0x000B, 0x000C, 0x000D, 0x0012, 0x0027, 0x0028, 0x0029] {
             let alg = HashAlgorithmId::from_id(id);
             assert_eq!(alg.to_id(), id);
         }
@@ -576,6 +609,9 @@ mod tests {
         assert_eq!(HashAlgorithmId::Sha384.digest_size(), Some(48));
         assert_eq!(HashAlgorithmId::Sha512.digest_size(), Some(64));
         assert_eq!(HashAlgorithmId::Sm3_256.digest_size(), Some(32));
+        assert_eq!(HashAlgorithmId::Sha3_256.digest_size(), Some(32));
+        assert_eq!(HashAlgorithmId::Sha3_384.digest_size(), Some(48));
+        assert_eq!(HashAlgorithmId::Sha3_512.digest_size(), Some(64));
     }
 
     #[test]
@@ -586,6 +622,8 @@ mod tests {
             (0x00000004, EventType::Separator),
             (0x80000001, EventType::EfiVariableDriverConfig),
             (0x80000003, EventType::EfiBootServicesApplication),
+            (0x8000000C, EventType::EfiVariableBoot2),
+            (0x80000010, EventType::EfiHcrtmEvent),
             (0x800000E0, EventType::EfiVariableAuthority),
         ];
         for (val, ty) in types {
@@ -648,5 +686,55 @@ mod tests {
     #[test]
     fn to_hex_values() {
         assert_eq!(to_hex(&[0x00, 0xFF, 0xAB]), "00ffab");
+    }
+
+    #[test]
+    fn guid_serde_round_trip() {
+        let bytes: [u8; 16] = [
+            0x61, 0xDF, 0xe4, 0x8B,
+            0x03, 0x17,
+            0x91, 0x4E,
+            0x96, 0xE8, 0x44, 0xB5, 0x0C, 0xD2, 0x16, 0xE2,
+        ];
+        let guid = Guid::from_bytes(bytes);
+        let json = serde_json::to_string(&guid).unwrap();
+        let recovered: Guid = serde_json::from_str(&json).unwrap();
+        assert_eq!(guid, recovered);
+    }
+
+    #[test]
+    fn sha3_algorithm_id_round_trip() {
+        let pairs = [
+            (0x0027u16, HashAlgorithmId::Sha3_256),
+            (0x0028, HashAlgorithmId::Sha3_384),
+            (0x0029, HashAlgorithmId::Sha3_512),
+        ];
+        for (id, expected) in pairs {
+            let alg = HashAlgorithmId::from_id(id);
+            assert_eq!(alg, expected);
+            assert_eq!(alg.to_id(), id);
+        }
+    }
+
+    #[test]
+    fn sha3_algorithm_id_serde_round_trip() {
+        for alg in [
+            HashAlgorithmId::Sha3_256,
+            HashAlgorithmId::Sha3_384,
+            HashAlgorithmId::Sha3_512,
+        ] {
+            let json = serde_json::to_string(&alg).unwrap();
+            let recovered: HashAlgorithmId = serde_json::from_str(&json).unwrap();
+            assert_eq!(alg, recovered);
+        }
+    }
+
+    #[test]
+    fn new_event_types_serde_round_trip() {
+        for et in [EventType::EfiVariableBoot2, EventType::EfiHcrtmEvent] {
+            let json = serde_json::to_string(&et).unwrap();
+            let recovered: EventType = serde_json::from_str(&json).unwrap();
+            assert_eq!(et, recovered);
+        }
     }
 }

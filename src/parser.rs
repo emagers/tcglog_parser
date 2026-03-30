@@ -7,7 +7,7 @@ use crate::error::{Cursor, ParseError};
 use crate::event::{DigestValue, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 use crate::event_data::{
     SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables,
-    UefiImageLoadEvent, UefiVariableData,
+    UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
 };
 use crate::pcr::{PcrState, MAX_PCR_INDEX, separator_digests};
 use crate::types::{EventType, HashAlgorithmId, to_hex};
@@ -220,6 +220,7 @@ impl TcgLogParser {
         };
 
         let mut events = Vec::new();
+        let mut legacy_events = Vec::new();
         let mut pcr_tables = Vec::new();
 
         if let Some(ref spec) = spec_id {
@@ -260,13 +261,18 @@ impl TcgLogParser {
 
             // Emit the final PCR tables.
             pcr_tables = pcr_state.into_banks();
+        } else {
+            // TCG 1.2-only log: parse remaining events in TCG 1.2 format.
+            while !cursor.is_empty() {
+                legacy_events.push(parse_tcg1_event(&mut cursor)?);
+            }
         }
-        // For TCG 1.2-only logs, events and pcr_tables are left empty.
 
         Ok(TcgLog {
             header,
             spec_id,
             events,
+            legacy_events,
             pcr_tables,
         })
     }
@@ -469,6 +475,7 @@ fn parse_builtin_event_data(
         // EFI variable events share the same payload structure.
         EventType::EfiVariableDriverConfig
         | EventType::EfiVariableBoot
+        | EventType::EfiVariableBoot2
         | EventType::EfiVariableAuthority => match UefiVariableData::parse(data) {
             Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
             Err(_) => raw_hex(data),
@@ -497,6 +504,11 @@ fn parse_builtin_event_data(
 
         // EFI handoff tables.
         EventType::EfiHandoffTables => match UefiHandoffTables::parse(data, uintn_size) {
+            Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
+            Err(_) => raw_hex(data),
+        },
+
+        EventType::EfiHandoffTables2 => match UefiHandoffTables2::parse(data, uintn_size) {
             Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
             Err(_) => raw_hex(data),
         },
@@ -874,8 +886,46 @@ mod tests {
         let log = TcgLogParser::new().parse(&data).unwrap();
         assert!(log.spec_id.is_none());
         assert!(log.events.is_empty());
+        assert!(log.legacy_events.is_empty());
         assert!(log.pcr_tables.is_empty());
         assert_eq!(log.header.event_type, 4); // EV_SEPARATOR
+    }
+
+    #[test]
+    fn parse_tcg1_multi_event_log() {
+        // Build a TCG 1.2 log with a header and two additional events.
+        let mut data = Vec::new();
+
+        // Header event (EV_POST_CODE).
+        data.extend_from_slice(&0u32.to_le_bytes()); // pcr_index = 0
+        data.extend_from_slice(&1u32.to_le_bytes()); // EV_POST_CODE
+        data.extend_from_slice(&[0xBB; 20]);          // SHA-1
+        data.extend_from_slice(&4u32.to_le_bytes()); // event_size
+        data.extend_from_slice(b"POST");
+
+        // Second event (EV_SEPARATOR for PCR 0).
+        data.extend_from_slice(&0u32.to_le_bytes()); // pcr_index = 0
+        data.extend_from_slice(&4u32.to_le_bytes()); // EV_SEPARATOR
+        data.extend_from_slice(&[0xCC; 20]);          // SHA-1
+        data.extend_from_slice(&4u32.to_le_bytes()); // event_size
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+
+        // Third event (EV_ACTION for PCR 1).
+        data.extend_from_slice(&1u32.to_le_bytes()); // pcr_index = 1
+        data.extend_from_slice(&5u32.to_le_bytes()); // EV_ACTION
+        data.extend_from_slice(&[0xDD; 20]);          // SHA-1
+        data.extend_from_slice(&6u32.to_le_bytes()); // event_size
+        data.extend_from_slice(b"action");
+
+        let log = TcgLogParser::new().parse(&data).unwrap();
+        assert!(log.spec_id.is_none());
+        assert!(log.events.is_empty());
+        assert_eq!(log.legacy_events.len(), 2);
+        assert_eq!(log.legacy_events[0].event_type, 4); // EV_SEPARATOR
+        assert_eq!(log.legacy_events[0].pcr_index, 0);
+        assert_eq!(log.legacy_events[1].event_type, 5); // EV_ACTION
+        assert_eq!(log.legacy_events[1].pcr_index, 1);
+        assert_eq!(log.legacy_events[1].event_data, to_hex(b"action"));
     }
 
     // ── event data parsing ────────────────────────────────────────────────────
