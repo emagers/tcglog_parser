@@ -154,7 +154,10 @@ mod tests {
 
     #[test]
     fn digest_count_mismatch_serializes() {
-        let w = ParseWarning::DigestCountMismatch { expected: 2, actual: 1 };
+        let w = ParseWarning::DigestCountMismatch {
+            expected: 2,
+            actual: 1,
+        };
         let json = serde_json::to_string(&w).unwrap();
         assert!(json.contains("digest_count_mismatch"));
     }

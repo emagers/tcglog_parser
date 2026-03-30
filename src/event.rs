@@ -114,7 +114,8 @@ pub struct TcgPcrEvent2 {
 /// subsequent events in the crypto-agile format.
 ///
 /// For legacy TCG 1.2-only logs (no SpecID header), `spec_id` will be `None`,
-/// `events` will be empty, and `pcr_tables` will be empty.
+/// `events` will be empty, and `legacy_events` will contain all events after
+/// the header in TCG 1.2 format.
 ///
 /// # PCR tables
 ///
@@ -162,6 +163,11 @@ pub struct TcgLog {
     ///
     /// Empty for legacy TCG 1.2-only logs.
     pub events: Vec<TcgPcrEvent2>,
+    /// All events following the header in TCG 1.2 format.
+    ///
+    /// Populated only for legacy TCG 1.2-only logs (when `spec_id` is
+    /// `None`).  Empty for TCG 2.0 logs.
+    pub legacy_events: Vec<TcgPcrEvent>,
     /// Emulated PCR tables, one per active hash algorithm.
     ///
     /// Each bank holds the final PCR values after replaying all events.

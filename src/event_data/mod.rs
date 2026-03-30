@@ -189,8 +189,9 @@ impl UefiVariableData {
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
             .collect();
-        let unicode_name = String::from_utf16(&name_u16)
-            .map_err(|_| ParseError::invalid_string(c.position(), "invalid UTF-16 variable name"))?;
+        let unicode_name = String::from_utf16(&name_u16).map_err(|_| {
+            ParseError::invalid_string(c.position(), "invalid UTF-16 variable name")
+        })?;
 
         let var_data = c.read_bytes(variable_data_length)?;
         let variable_data = to_hex(var_data);
@@ -421,6 +422,68 @@ impl UefiHandoffTables {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// UEFI handoff tables v2  (EV_EFI_HANDOFF_TABLES2)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Event data for `EV_EFI_HANDOFF_TABLES2`.
+///
+/// Extends [`UefiHandoffTables`] with a human-readable description string.
+/// Corresponds to `UEFI_HANDOFF_TABLE_POINTERS2` in the TCG spec.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UefiHandoffTables2 {
+    /// Human-readable ASCII description of the handoff tables.
+    pub table_description: String,
+    /// The list of EFI configuration tables handed off.
+    pub tables: Vec<EfiConfigurationTable>,
+}
+
+impl UefiHandoffTables2 {
+    /// Parse a [`UefiHandoffTables2`] from raw event-data bytes.
+    ///
+    /// `uintn_size` must be either `4` or `8`, sourced from the log's
+    /// [`SpecIdEvent`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tcglog_parser::event_data::UefiHandoffTables2;
+    ///
+    /// let mut data = Vec::new();
+    /// let desc = b"ACPI Tables";
+    /// data.push(desc.len() as u8);                       // description size
+    /// data.extend_from_slice(desc);                       // description
+    /// data.extend_from_slice(&1u64.to_le_bytes());        // NumberOfTables (uintn=8)
+    /// data.extend_from_slice(&[1u8; 16]);                 // vendor GUID
+    /// data.extend_from_slice(&0xABCDu64.to_le_bytes());   // vendor table ptr
+    ///
+    /// let tables = UefiHandoffTables2::parse(&data, 8).unwrap();
+    /// assert_eq!(tables.table_description, "ACPI Tables");
+    /// assert_eq!(tables.tables.len(), 1);
+    /// ```
+    pub fn parse(data: &[u8], uintn_size: u8) -> Result<Self, ParseError> {
+        let mut c = Cursor::new(data);
+        let desc_size = c.read_u8()? as usize;
+        let desc_bytes = c.read_bytes(desc_size)?;
+        let table_description = String::from_utf8_lossy(desc_bytes).into_owned();
+        let num_tables = read_uintn(&mut c, uintn_size)? as usize;
+        let mut tables = Vec::with_capacity(num_tables);
+        for _ in 0..num_tables {
+            let guid_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+            let vendor_guid = Guid::from_bytes(guid_bytes);
+            let vendor_table = read_uintn(&mut c, uintn_size)?;
+            tables.push(EfiConfigurationTable {
+                vendor_guid,
+                vendor_table,
+            });
+        }
+        Ok(Self {
+            table_description,
+            tables,
+        })
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Startup locality event  (EV_NO_ACTION with "StartupLocality\0" signature)
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -631,5 +694,21 @@ mod tests {
         let tables = UefiHandoffTables::parse(&data, 8).unwrap();
         assert_eq!(tables.tables.len(), 1);
         assert_eq!(tables.tables[0].vendor_table, 0xBEEF);
+    }
+
+    #[test]
+    fn uefi_handoff_tables2_parse() {
+        let mut data = Vec::new();
+        let desc = b"ACPI Tables";
+        data.push(desc.len() as u8);
+        data.extend_from_slice(desc);
+        data.extend_from_slice(&1u64.to_le_bytes()); // 1 table, uintn=8
+        data.extend_from_slice(&[3u8; 16]); // GUID
+        data.extend_from_slice(&0xCAFEu64.to_le_bytes()); // pointer
+
+        let tables = UefiHandoffTables2::parse(&data, 8).unwrap();
+        assert_eq!(tables.table_description, "ACPI Tables");
+        assert_eq!(tables.tables.len(), 1);
+        assert_eq!(tables.tables[0].vendor_table, 0xCAFE);
     }
 }
