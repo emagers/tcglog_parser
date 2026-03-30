@@ -499,17 +499,7 @@ impl Guid {
         let d4 = &self.bytes[8..16];
         format!(
             "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
-            d1,
-            d2,
-            d3,
-            d4[0],
-            d4[1],
-            d4[2],
-            d4[3],
-            d4[4],
-            d4[5],
-            d4[6],
-            d4[7],
+            d1, d2, d3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7],
         )
     }
 }
@@ -545,7 +535,10 @@ impl From<String> for Guid {
             d4[i] = u8::from_str_radix(&d4_str[i * 2..i * 2 + 2], 16).unwrap_or(0);
         }
         Self {
-            bytes: [d1[0], d1[1], d1[2], d1[3], d2[0], d2[1], d3[0], d3[1], d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7]],
+            bytes: [
+                d1[0], d1[1], d1[2], d1[3], d2[0], d2[1], d3[0], d3[1], d4[0], d4[1], d4[2], d4[3],
+                d4[4], d4[5], d4[6], d4[7],
+            ],
         }
     }
 }
@@ -588,7 +581,9 @@ mod tests {
 
     #[test]
     fn hash_algorithm_id_round_trip() {
-        for &id in &[0x0004u16, 0x000B, 0x000C, 0x000D, 0x0012, 0x0027, 0x0028, 0x0029] {
+        for &id in &[
+            0x0004u16, 0x000B, 0x000C, 0x000D, 0x0012, 0x0027, 0x0028, 0x0029,
+        ] {
             let alg = HashAlgorithmId::from_id(id);
             assert_eq!(alg.to_id(), id);
         }
@@ -664,8 +659,8 @@ mod tests {
         // EFI_GLOBAL_VARIABLE GUID: 8be4df61-1703-4e91-96e8-44b50cd216e2
         let bytes: [u8; 16] = [
             0x61, 0xDF, 0xe4, 0x8B, // Data1 LE
-            0x03, 0x17,              // Data2 LE
-            0x91, 0x4E,              // Data3 LE
+            0x03, 0x17, // Data2 LE
+            0x91, 0x4E, // Data3 LE
             0x96, 0xE8, 0x44, 0xB5, 0x0C, 0xD2, 0x16, 0xE2,
         ];
         let guid = Guid::from_bytes(bytes);
@@ -691,10 +686,8 @@ mod tests {
     #[test]
     fn guid_serde_round_trip() {
         let bytes: [u8; 16] = [
-            0x61, 0xDF, 0xe4, 0x8B,
-            0x03, 0x17,
-            0x91, 0x4E,
-            0x96, 0xE8, 0x44, 0xB5, 0x0C, 0xD2, 0x16, 0xE2,
+            0x61, 0xDF, 0xe4, 0x8B, 0x03, 0x17, 0x91, 0x4E, 0x96, 0xE8, 0x44, 0xB5, 0x0C, 0xD2,
+            0x16, 0xE2,
         ];
         let guid = Guid::from_bytes(bytes);
         let json = serde_json::to_string(&guid).unwrap();

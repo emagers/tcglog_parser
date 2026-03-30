@@ -134,7 +134,9 @@ impl<'a> Cursor<'a> {
     /// Reads a little-endian `u64`.
     pub fn read_u64_le(&mut self) -> Result<u64, ParseError> {
         let b = self.read_bytes(8)?;
-        Ok(u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 }
 

@@ -9,7 +9,7 @@ use crate::event_data::{
     SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables,
     UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
 };
-use crate::pcr::{PcrState, MAX_PCR_INDEX, separator_digests};
+use crate::pcr::{MAX_PCR_INDEX, PcrState, separator_digests};
 use crate::types::{EventType, HashAlgorithmId, to_hex};
 use crate::warning::ParseWarning;
 
@@ -81,11 +81,7 @@ pub trait EventDataParser: Send + Sync {
     ///
     /// Return [`ParseError::CustomParser`] (or any other [`ParseError`] variant)
     /// if the data cannot be decoded.
-    fn parse(
-        &self,
-        event_type: u32,
-        data: &[u8],
-    ) -> Result<serde_json::Value, ParseError>;
+    fn parse(&self, event_type: u32, data: &[u8]) -> Result<serde_json::Value, ParseError>;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -641,7 +637,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&0u32.to_le_bytes()); // pcr_index
         data.extend_from_slice(&3u32.to_le_bytes()); // event_type (EV_NO_ACTION)
-        data.extend_from_slice(&[0u8; 20]);           // SHA-1 (all zeros)
+        data.extend_from_slice(&[0u8; 20]); // SHA-1 (all zeros)
         data.extend_from_slice(&4u32.to_le_bytes()); // event_size
         data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // event data
 
@@ -696,8 +692,11 @@ mod tests {
         let raw = crate::tests::tcg2_log_with_locality(0);
         let log = TcgLogParser::new().parse(&raw).unwrap();
         let sha256 = &log.pcr_tables[0];
-        assert_eq!(sha256.pcrs[&0], "0".repeat(64),
-            "locality 0: PCR 0 must be all zeros");
+        assert_eq!(
+            sha256.pcrs[&0],
+            "0".repeat(64),
+            "locality 0: PCR 0 must be all zeros"
+        );
         // Other PCRs also zeros.
         for pcr in 1..=23u32 {
             assert_eq!(sha256.pcrs[&pcr], "0".repeat(64));
@@ -710,12 +709,19 @@ mod tests {
         let raw = crate::tests::tcg2_log_with_locality(3);
         let log = TcgLogParser::new().parse(&raw).unwrap();
         let sha256 = &log.pcr_tables[0];
-        assert_eq!(sha256.pcrs[&0], "ff".repeat(32),
-            "locality 3: PCR 0 must be all 0xFF");
+        assert_eq!(
+            sha256.pcrs[&0],
+            "ff".repeat(32),
+            "locality 3: PCR 0 must be all 0xFF"
+        );
         // PCRs 1-23 remain zeros.
         for pcr in 1..=23u32 {
-            assert_eq!(sha256.pcrs[&pcr], "0".repeat(64),
-                "locality 3: PCR {} must still be zeros", pcr);
+            assert_eq!(
+                sha256.pcrs[&pcr],
+                "0".repeat(64),
+                "locality 3: PCR {} must still be zeros",
+                pcr
+            );
         }
     }
 
@@ -725,8 +731,11 @@ mod tests {
         let raw = crate::tests::tcg2_log_with_locality(4);
         let log = TcgLogParser::new().parse(&raw).unwrap();
         let sha256 = &log.pcr_tables[0];
-        assert_eq!(sha256.pcrs[&0], "ff".repeat(32),
-            "locality 4: PCR 0 must be all 0xFF");
+        assert_eq!(
+            sha256.pcrs[&0],
+            "ff".repeat(32),
+            "locality 4: PCR 0 must be all 0xFF"
+        );
     }
 
     #[test]
@@ -735,8 +744,12 @@ mod tests {
         for loc in [1u8, 2] {
             let raw = crate::tests::tcg2_log_with_locality(loc);
             let log = TcgLogParser::new().parse(&raw).unwrap();
-            assert_eq!(log.pcr_tables[0].pcrs[&0], "0".repeat(64),
-                "locality {}: PCR 0 must be zeros", loc);
+            assert_eq!(
+                log.pcr_tables[0].pcrs[&0],
+                "0".repeat(64),
+                "locality {}: PCR 0 must be zeros",
+                loc
+            );
         }
     }
 
@@ -776,15 +789,21 @@ mod tests {
             log
         };
 
-        let log0 = TcgLogParser::new().parse(&make_log_with_post_measurement(0)).unwrap();
-        let log3 = TcgLogParser::new().parse(&make_log_with_post_measurement(3)).unwrap();
+        let log0 = TcgLogParser::new()
+            .parse(&make_log_with_post_measurement(0))
+            .unwrap();
+        let log3 = TcgLogParser::new()
+            .parse(&make_log_with_post_measurement(3))
+            .unwrap();
 
         let pcr0_loc0 = &log0.pcr_tables[0].pcrs[&0];
         let pcr0_loc3 = &log3.pcr_tables[0].pcrs[&0];
 
-        assert_ne!(pcr0_loc0, pcr0_loc3,
+        assert_ne!(
+            pcr0_loc0, pcr0_loc3,
             "Same measurement into PCR 0 must produce different values \
-             when startup locality differs (different initial PCR 0 value)");
+             when startup locality differs (different initial PCR 0 value)"
+        );
     }
 
     #[test]
@@ -793,8 +812,11 @@ mod tests {
         let spec = spec_id_bytes(&[(0x000B, 32)]);
         let log_bytes = first_event_bytes(&spec); // only SpecID header, no StartupLocality
         let log = TcgLogParser::new().parse(&log_bytes).unwrap();
-        assert_eq!(log.pcr_tables[0].pcrs[&0], "0".repeat(64),
-            "Absent StartupLocality event must default PCR 0 to zeros");
+        assert_eq!(
+            log.pcr_tables[0].pcrs[&0],
+            "0".repeat(64),
+            "Absent StartupLocality event must default PCR 0 to zeros"
+        );
     }
 
     // ── JSON serialization ────────────────────────────────────────────────────
@@ -836,7 +858,9 @@ mod tests {
     fn custom_parser_is_called() {
         struct AlwaysNull;
         impl EventDataParser for AlwaysNull {
-            fn can_parse(&self, _: u32) -> bool { true }
+            fn can_parse(&self, _: u32) -> bool {
+                true
+            }
             fn parse(&self, _: u32, _: &[u8]) -> Result<serde_json::Value, ParseError> {
                 Ok(serde_json::Value::Null)
             }
@@ -856,7 +880,9 @@ mod tests {
     fn custom_parser_not_called_for_other_types() {
         struct OnlyVendor;
         impl EventDataParser for OnlyVendor {
-            fn can_parse(&self, event_type: u32) -> bool { event_type == 0xA0000001 }
+            fn can_parse(&self, event_type: u32) -> bool {
+                event_type == 0xA0000001
+            }
             fn parse(&self, _: u32, _: &[u8]) -> Result<serde_json::Value, ParseError> {
                 Ok(serde_json::json!({ "vendor": true }))
             }
@@ -879,7 +905,7 @@ mod tests {
         let mut data = Vec::new();
         data.extend_from_slice(&0u32.to_le_bytes()); // pcr_index
         data.extend_from_slice(&4u32.to_le_bytes()); // EV_SEPARATOR
-        data.extend_from_slice(&[0xAA; 20]);          // SHA-1
+        data.extend_from_slice(&[0xAA; 20]); // SHA-1
         data.extend_from_slice(&4u32.to_le_bytes()); // event_size
         data.extend_from_slice(&[0xFF, 0xFF, 0xFF, 0xFF]);
 
@@ -899,21 +925,21 @@ mod tests {
         // Header event (EV_POST_CODE).
         data.extend_from_slice(&0u32.to_le_bytes()); // pcr_index = 0
         data.extend_from_slice(&1u32.to_le_bytes()); // EV_POST_CODE
-        data.extend_from_slice(&[0xBB; 20]);          // SHA-1
+        data.extend_from_slice(&[0xBB; 20]); // SHA-1
         data.extend_from_slice(&4u32.to_le_bytes()); // event_size
         data.extend_from_slice(b"POST");
 
         // Second event (EV_SEPARATOR for PCR 0).
         data.extend_from_slice(&0u32.to_le_bytes()); // pcr_index = 0
         data.extend_from_slice(&4u32.to_le_bytes()); // EV_SEPARATOR
-        data.extend_from_slice(&[0xCC; 20]);          // SHA-1
+        data.extend_from_slice(&[0xCC; 20]); // SHA-1
         data.extend_from_slice(&4u32.to_le_bytes()); // event_size
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
 
         // Third event (EV_ACTION for PCR 1).
         data.extend_from_slice(&1u32.to_le_bytes()); // pcr_index = 1
         data.extend_from_slice(&5u32.to_le_bytes()); // EV_ACTION
-        data.extend_from_slice(&[0xDD; 20]);          // SHA-1
+        data.extend_from_slice(&[0xDD; 20]); // SHA-1
         data.extend_from_slice(&6u32.to_le_bytes()); // event_size
         data.extend_from_slice(b"action");
 
@@ -989,9 +1015,19 @@ mod tests {
         let log = TcgLogParser::new().parse(&raw).unwrap();
 
         // First event is the separator (no post-cap warning).
-        assert!(log.events[0].warnings.iter().all(|w| !matches!(w, ParseWarning::PostCapMeasurement { .. })));
+        assert!(
+            log.events[0]
+                .warnings
+                .iter()
+                .all(|w| !matches!(w, ParseWarning::PostCapMeasurement { .. }))
+        );
         // Second event should have PostCapMeasurement warning.
-        assert!(log.events[1].warnings.iter().any(|w| matches!(w, ParseWarning::PostCapMeasurement { pcr_index: 0 })));
+        assert!(
+            log.events[1]
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::PostCapMeasurement { pcr_index: 0 }))
+        );
     }
 
     #[test]
@@ -1004,7 +1040,12 @@ mod tests {
 
         let parsed = TcgLogParser::new().parse(&log).unwrap();
         // Second separator should warn.
-        assert!(parsed.events[1].warnings.iter().any(|w| matches!(w, ParseWarning::DuplicateSeparator { pcr_index: 0 })));
+        assert!(
+            parsed.events[1]
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::DuplicateSeparator { pcr_index: 0 }))
+        );
     }
 
     #[test]
@@ -1015,7 +1056,12 @@ mod tests {
         append_tcg2_event(&mut log, 0, 0x00000004, &[(0x000B, 32)], &[0xFF; 4]);
 
         let parsed = TcgLogParser::new().parse(&log).unwrap();
-        assert!(parsed.events[0].warnings.iter().any(|w| matches!(w, ParseWarning::ErrorSeparator { pcr_index: 0 })));
+        assert!(
+            parsed.events[0]
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::ErrorSeparator { pcr_index: 0 }))
+        );
     }
 
     #[test]
@@ -1026,7 +1072,12 @@ mod tests {
         append_tcg2_event(&mut log, 100, 0x00000001, &[(0x000B, 32)], b"data");
 
         let parsed = TcgLogParser::new().parse(&log).unwrap();
-        assert!(parsed.events[0].warnings.iter().any(|w| matches!(w, ParseWarning::InvalidPcrIndex { pcr_index: 100 })));
+        assert!(
+            parsed.events[0]
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::InvalidPcrIndex { pcr_index: 100 }))
+        );
     }
 
     #[test]
@@ -1038,9 +1089,13 @@ mod tests {
         append_tcg2_event(&mut log, 0, 0x00000001, &[(0x000B, 32)], b"data");
 
         let parsed = TcgLogParser::new().parse(&log).unwrap();
-        assert!(parsed.events[0].warnings.iter().any(|w|
-            matches!(w, ParseWarning::DigestCountMismatch { expected: 2, actual: 1 })
-        ));
+        assert!(parsed.events[0].warnings.iter().any(|w| matches!(
+            w,
+            ParseWarning::DigestCountMismatch {
+                expected: 2,
+                actual: 1
+            }
+        )));
     }
 
     #[test]
@@ -1060,9 +1115,12 @@ mod tests {
         log.extend_from_slice(&event_bytes);
 
         let parsed = TcgLogParser::new().parse(&log).unwrap();
-        assert!(parsed.events[0].warnings.iter().any(|w|
-            matches!(w, ParseWarning::NonZeroNoActionDigest { algorithm: HashAlgorithmId::Sha256 })
-        ));
+        assert!(parsed.events[0].warnings.iter().any(|w| matches!(
+            w,
+            ParseWarning::NonZeroNoActionDigest {
+                algorithm: HashAlgorithmId::Sha256
+            }
+        )));
     }
 
     #[test]
@@ -1079,17 +1137,19 @@ mod tests {
         ev.extend_from_slice(&1u32.to_le_bytes()); // EV_POST_CODE
         ev.extend_from_slice(&1u32.to_le_bytes()); // digest_count
         ev.extend_from_slice(&0x000Bu16.to_le_bytes()); // SHA-256 alg
-        ev.extend_from_slice(&sep_digest);          // the separator digest value
+        ev.extend_from_slice(&sep_digest); // the separator digest value
         ev.extend_from_slice(&4u32.to_le_bytes()); // event_size
         ev.extend_from_slice(&[0u8; 4]);
         log.extend_from_slice(&ev);
 
         let parsed = TcgLogParser::new().parse(&log).unwrap();
-        assert!(parsed.events[0].warnings.iter().any(|w|
-            matches!(w, ParseWarning::SuspiciousSeparatorDigest {
-                algorithm: HashAlgorithmId::Sha256, ..
-            })
-        ));
+        assert!(parsed.events[0].warnings.iter().any(|w| matches!(
+            w,
+            ParseWarning::SuspiciousSeparatorDigest {
+                algorithm: HashAlgorithmId::Sha256,
+                ..
+            }
+        )));
     }
 
     #[test]
@@ -1112,9 +1172,12 @@ mod tests {
         log.extend_from_slice(&ev);
 
         let parsed = TcgLogParser::new().parse(&log).unwrap();
-        assert!(!parsed.events[0].warnings.iter().any(|w|
-            matches!(w, ParseWarning::SuspiciousSeparatorDigest { .. })
-        ));
+        assert!(
+            !parsed.events[0]
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::SuspiciousSeparatorDigest { .. }))
+        );
     }
 
     #[test]
@@ -1122,7 +1185,11 @@ mod tests {
         let raw = minimal_tcg2_log();
         let log = TcgLogParser::new().parse(&raw).unwrap();
         for ev in &log.events {
-            assert!(ev.warnings.is_empty(), "unexpected warnings: {:?}", ev.warnings);
+            assert!(
+                ev.warnings.is_empty(),
+                "unexpected warnings: {:?}",
+                ev.warnings
+            );
         }
     }
 

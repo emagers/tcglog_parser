@@ -108,8 +108,7 @@ pub use error::ParseError;
 pub use event::{DigestValue, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 pub use event_data::{
     AlgorithmSize, EfiConfigurationTable, SpecIdEvent, StartupLocality, UefiFirmwareBlob,
-    UefiFirmwareBlob2, UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent,
-    UefiVariableData,
+    UefiFirmwareBlob2, UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
 };
 pub use parser::{EventDataParser, TcgLogParser};
 pub use pcr::PcrBank;
@@ -151,21 +150,21 @@ pub mod tests {
         // ── SpecID event data ──────────────────────────────────────────────
         let mut spec_id_data = Vec::new();
         spec_id_data.extend_from_slice(b"Spec ID Event03\0"); // signature
-        spec_id_data.extend_from_slice(&0u32.to_le_bytes());  // platform_class
+        spec_id_data.extend_from_slice(&0u32.to_le_bytes()); // platform_class
         spec_id_data.push(0); // minor
         spec_id_data.push(2); // major
         spec_id_data.push(0); // errata
         spec_id_data.push(8); // uintn_size (64-bit)
-        spec_id_data.extend_from_slice(&1u32.to_le_bytes());      // num_algorithms
+        spec_id_data.extend_from_slice(&1u32.to_le_bytes()); // num_algorithms
         spec_id_data.extend_from_slice(&0x000Bu16.to_le_bytes()); // SHA-256
-        spec_id_data.extend_from_slice(&32u16.to_le_bytes());     // digest size
+        spec_id_data.extend_from_slice(&32u16.to_le_bytes()); // digest size
         spec_id_data.push(0); // vendor_info_size
 
         // ── First event (TCG 1.2 format, carries SpecID) ──────────────────
         let mut log = Vec::new();
         log.extend_from_slice(&0u32.to_le_bytes()); // pcr_index
         log.extend_from_slice(&3u32.to_le_bytes()); // EV_NO_ACTION
-        log.extend_from_slice(&[0u8; 20]);           // SHA-1 (zeros)
+        log.extend_from_slice(&[0u8; 20]); // SHA-1 (zeros)
         log.extend_from_slice(&(spec_id_data.len() as u32).to_le_bytes());
         log.extend_from_slice(&spec_id_data);
 
@@ -178,7 +177,7 @@ pub mod tests {
         log.extend_from_slice(&3u32.to_le_bytes()); // EV_NO_ACTION
         log.extend_from_slice(&1u32.to_le_bytes()); // digest_count
         log.extend_from_slice(&0x000Bu16.to_le_bytes()); // SHA-256 alg id
-        log.extend_from_slice(&[0u8; 32]);           // SHA-256 digest (zeros)
+        log.extend_from_slice(&[0u8; 32]); // SHA-256 digest (zeros)
         log.extend_from_slice(&(startup_data.len() as u32).to_le_bytes());
         log.extend_from_slice(&startup_data);
 
@@ -226,8 +225,8 @@ pub mod tests {
 
         append_tcg2_event(
             &mut log,
-            0,                    // pcr_index
-            0x80000001,           // EV_EFI_VARIABLE_DRIVER_CONFIG
+            0,          // pcr_index
+            0x80000001, // EV_EFI_VARIABLE_DRIVER_CONFIG
             &[(0x000B, 32)],
             &ev_data,
         );
@@ -255,7 +254,7 @@ pub mod tests {
 
         let mut ev_data = Vec::new();
         ev_data.extend_from_slice(&0xFF000000u64.to_le_bytes()); // base
-        ev_data.extend_from_slice(&0x100000u64.to_le_bytes());   // length
+        ev_data.extend_from_slice(&0x100000u64.to_le_bytes()); // length
 
         append_tcg2_event(&mut log, 0, 0x80000008, &[(0x000B, 32)], &ev_data);
         log
@@ -308,7 +307,7 @@ pub mod tests {
         log.extend_from_slice(&3u32.to_le_bytes()); // EV_NO_ACTION
         log.extend_from_slice(&1u32.to_le_bytes()); // digest_count
         log.extend_from_slice(&0x000Bu16.to_le_bytes()); // SHA-256 alg id
-        log.extend_from_slice(&[0u8; 32]);               // digest (zeros — EV_NO_ACTION)
+        log.extend_from_slice(&[0u8; 32]); // digest (zeros — EV_NO_ACTION)
         log.extend_from_slice(&(startup_data.len() as u32).to_le_bytes());
         log.extend_from_slice(&startup_data);
 
@@ -321,7 +320,10 @@ pub mod tests {
         let mut d = Vec::new();
         d.extend_from_slice(b"Spec ID Event03\0");
         d.extend_from_slice(&0u32.to_le_bytes());
-        d.push(0); d.push(2); d.push(0); d.push(8);
+        d.push(0);
+        d.push(2);
+        d.push(0);
+        d.push(8);
         d.extend_from_slice(&(algorithms.len() as u32).to_le_bytes());
         for &(id, sz) in algorithms {
             d.extend_from_slice(&id.to_le_bytes());

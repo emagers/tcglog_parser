@@ -39,10 +39,10 @@ use crate::types::{HashAlgorithmId, to_hex};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use sha1::Sha1;
-use sha2::{Sha256, Sha384, Sha512};
 use sha1::Digest as Sha1Digest;
+use sha1::Sha1;
 use sha2::Digest as Sha2Digest;
+use sha2::{Sha256, Sha384, Sha512};
 
 /// The maximum valid PCR index per the TCG PC Client Platform Firmware Profile
 /// Specification.  PCRs 0–23 are defined; indices ≥ 24 are out of range.
@@ -137,7 +137,7 @@ impl PcrEntry {
 /// for inclusion in [`TcgLog`](crate::TcgLog).
 pub(crate) struct PcrState {
     algorithms: Vec<(HashAlgorithmId, usize)>, // (alg, digest_size)
-    pcrs: Vec<Vec<PcrEntry>>,                   // [bank_idx][pcr_idx 0..=23]
+    pcrs: Vec<Vec<PcrEntry>>,                  // [bank_idx][pcr_idx 0..=23]
 }
 
 impl PcrState {
@@ -406,8 +406,14 @@ mod tests {
     #[test]
     fn separator_digests_sha256() {
         let (normal, error) = separator_digests(HashAlgorithmId::Sha256).unwrap();
-        assert_eq!(normal, "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119");
-        assert_eq!(error, "ad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e");
+        assert_eq!(
+            normal,
+            "df3f619804a92fdb4057192dc43dd748ea778adc52bc498ce80524c014b81119"
+        );
+        assert_eq!(
+            error,
+            "ad95131bc0b799c0b1af477fb14fcf26a6a9f76079e48bf090acb7e8367bfd0e"
+        );
     }
 
     #[test]
@@ -431,8 +437,12 @@ mod tests {
         state.set_startup_locality(0);
         let banks = state.into_banks();
         for pcr_idx in 0..=MAX_PCR_INDEX {
-            assert_eq!(banks[0].pcrs[&pcr_idx], "0".repeat(64),
-                "PCR {} should be all zeros for locality 0", pcr_idx);
+            assert_eq!(
+                banks[0].pcrs[&pcr_idx],
+                "0".repeat(64),
+                "PCR {} should be all zeros for locality 0",
+                pcr_idx
+            );
         }
     }
 
@@ -442,11 +452,18 @@ mod tests {
         let mut state = PcrState::new(&[(HashAlgorithmId::Sha256, 32)]);
         state.set_startup_locality(3);
         let banks = state.into_banks();
-        assert_eq!(banks[0].pcrs[&0], "ff".repeat(32),
-            "PCR 0 should be all 0xFF for locality 3");
+        assert_eq!(
+            banks[0].pcrs[&0],
+            "ff".repeat(32),
+            "PCR 0 should be all 0xFF for locality 3"
+        );
         for pcr_idx in 1..=MAX_PCR_INDEX {
-            assert_eq!(banks[0].pcrs[&pcr_idx], "0".repeat(64),
-                "PCR {} should still be all zeros for locality 3", pcr_idx);
+            assert_eq!(
+                banks[0].pcrs[&pcr_idx],
+                "0".repeat(64),
+                "PCR {} should still be all zeros for locality 3",
+                pcr_idx
+            );
         }
     }
 
@@ -456,25 +473,34 @@ mod tests {
         let mut state = PcrState::new(&[(HashAlgorithmId::Sha1, 20)]);
         state.set_startup_locality(4);
         let banks = state.into_banks();
-        assert_eq!(banks[0].pcrs[&0], "ff".repeat(20),
-            "PCR 0 should be all 0xFF for locality 4");
+        assert_eq!(
+            banks[0].pcrs[&0],
+            "ff".repeat(20),
+            "PCR 0 should be all 0xFF for locality 4"
+        );
         for pcr_idx in 1..=MAX_PCR_INDEX {
-            assert_eq!(banks[0].pcrs[&pcr_idx], "0".repeat(40),
-                "PCR {} should be zeros for locality 4", pcr_idx);
+            assert_eq!(
+                banks[0].pcrs[&pcr_idx],
+                "0".repeat(40),
+                "PCR {} should be zeros for locality 4",
+                pcr_idx
+            );
         }
     }
 
     #[test]
     fn set_startup_locality_applies_to_all_banks() {
         // When multiple algorithms are active, PCR 0 must be all-0xFF in each.
-        let mut state = PcrState::new(&[
-            (HashAlgorithmId::Sha1, 20),
-            (HashAlgorithmId::Sha256, 32),
-        ]);
+        let mut state =
+            PcrState::new(&[(HashAlgorithmId::Sha1, 20), (HashAlgorithmId::Sha256, 32)]);
         state.set_startup_locality(3);
         let banks = state.into_banks();
         assert_eq!(banks[0].pcrs[&0], "ff".repeat(20), "SHA-1 PCR 0 not all FF");
-        assert_eq!(banks[1].pcrs[&0], "ff".repeat(32), "SHA-256 PCR 0 not all FF");
+        assert_eq!(
+            banks[1].pcrs[&0],
+            "ff".repeat(32),
+            "SHA-256 PCR 0 not all FF"
+        );
     }
 
     #[test]
@@ -518,8 +544,10 @@ mod tests {
         state3.set_startup_locality(3);
         state3.extend(0, HashAlgorithmId::Sha256, &digest);
 
-        assert_ne!(state0.pcrs[0][0].value, state3.pcrs[0][0].value,
-            "PCR 0 after extension must differ when initial value differs");
+        assert_ne!(
+            state0.pcrs[0][0].value, state3.pcrs[0][0].value,
+            "PCR 0 after extension must differ when initial value differs"
+        );
     }
 
     #[test]

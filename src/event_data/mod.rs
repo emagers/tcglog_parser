@@ -189,8 +189,9 @@ impl UefiVariableData {
             .chunks_exact(2)
             .map(|b| u16::from_le_bytes([b[0], b[1]]))
             .collect();
-        let unicode_name = String::from_utf16(&name_u16)
-            .map_err(|_| ParseError::invalid_string(c.position(), "invalid UTF-16 variable name"))?;
+        let unicode_name = String::from_utf16(&name_u16).map_err(|_| {
+            ParseError::invalid_string(c.position(), "invalid UTF-16 variable name")
+        })?;
 
         let var_data = c.read_bytes(variable_data_length)?;
         let variable_data = to_hex(var_data);
