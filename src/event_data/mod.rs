@@ -484,6 +484,244 @@ impl UefiHandoffTables2 {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// UEFI GPT data  (EV_EFI_GPT_EVENT)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// The base EFI table header (common to many EFI structures).
+///
+/// Corresponds to `EFI_TABLE_HEADER` in the UEFI specification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EfiTableHeader {
+    /// Table identifier, lowercase hex-encoded.  The on-disk bytes are
+    /// hex-encoded in order, without endian conversion.  For a GPT partition
+    /// header the signature is the ASCII string `"EFI PART"` (bytes
+    /// `45 46 49 20 50 41 52 54`), yielding the hex string
+    /// `"4546492050415254"`.
+    pub signature: String,
+    /// Revision number of the structure.
+    pub revision: u32,
+    /// Size of the table header in bytes.
+    pub header_size: u32,
+    /// CRC32 checksum of the table header (covering `header_size` bytes with
+    /// this field set to zero during calculation).
+    pub header_crc32: u32,
+}
+
+/// EFI GUID Partition Table (GPT) header.
+///
+/// Corresponds to `EFI_PARTITION_TABLE_HEADER` in the UEFI specification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EfiPartitionTableHeader {
+    /// The base EFI table header.
+    pub header: EfiTableHeader,
+    /// LBA of this header structure itself.
+    pub my_lba: u64,
+    /// LBA of the alternate (backup) GPT header.
+    pub alternate_lba: u64,
+    /// First LBA usable for partition data.
+    pub first_usable_lba: u64,
+    /// Last LBA usable for partition data (inclusive).
+    pub last_usable_lba: u64,
+    /// Disk GUID (unique identifier for this disk).
+    pub disk_guid: Guid,
+    /// LBA of the first entry in the partition entry array.
+    pub partition_entry_lba: u64,
+    /// Total number of partition entries allocated in the array.
+    pub number_of_partition_entries: u32,
+    /// Size in bytes of each partition entry (must be 128 or a multiple of 128).
+    pub size_of_partition_entry: u32,
+    /// CRC32 of the partition entry array.
+    pub partition_entry_array_crc32: u32,
+}
+
+/// A single entry from a GUID Partition Table.
+///
+/// Corresponds to `EFI_PARTITION_ENTRY` in the UEFI specification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EfiPartitionEntry {
+    /// GUID defining the partition type (e.g. Linux data, EFI System).
+    pub partition_type_guid: Guid,
+    /// GUID that uniquely identifies this partition instance.
+    pub unique_partition_guid: Guid,
+    /// First LBA of the partition.
+    pub starting_lba: u64,
+    /// Last LBA of the partition (inclusive).
+    pub ending_lba: u64,
+    /// Partition attribute flags.
+    pub attributes: u64,
+    /// Human-readable partition name (decoded from UCS-2LE, null chars trimmed).
+    pub partition_name: String,
+}
+
+impl EfiPartitionEntry {
+    /// Parse an `EfiPartitionEntry` from raw bytes.
+    ///
+    /// `data` must cover exactly one entry as reported by
+    /// [`EfiPartitionTableHeader::size_of_partition_entry`]; the standard size
+    /// is 128 bytes.  Any bytes beyond the standard 128 are ignored.
+    fn parse(data: &[u8]) -> Result<Self, ParseError> {
+        let mut c = Cursor::new(data);
+
+        let type_guid_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+        let partition_type_guid = Guid::from_bytes(type_guid_bytes);
+
+        let unique_guid_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+        let unique_partition_guid = Guid::from_bytes(unique_guid_bytes);
+
+        let starting_lba = c.read_u64_le()?;
+        let ending_lba = c.read_u64_le()?;
+        let attributes = c.read_u64_le()?;
+
+        // Partition name: CHAR16[36] = 72 bytes of UCS-2LE.
+        let name_bytes = c.read_bytes(72)?;
+        let name_u16: Vec<u16> = name_bytes
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let partition_name = String::from_utf16_lossy(&name_u16)
+            .trim_matches('\0')
+            .to_string();
+
+        Ok(Self {
+            partition_type_guid,
+            unique_partition_guid,
+            starting_lba,
+            ending_lba,
+            attributes,
+            partition_name,
+        })
+    }
+}
+
+/// Event data for `EV_EFI_GPT_EVENT`.
+///
+/// Records the GUID Partition Table (GPT) partition data measured by the
+/// firmware.  This is an *aggregated* event: a single log entry captures the
+/// GPT header together with all valid (non-empty) partition entries.
+///
+/// Corresponds to `UEFI_GPT_DATA` in the TCG PC Client Platform Firmware
+/// Profile Specification.
+///
+/// # Examples
+///
+/// ```
+/// use tcglog_parser::event_data::UefiGptData;
+///
+/// // Minimal UEFI_GPT_DATA: GPT header + zero partitions.
+/// let mut data = Vec::new();
+/// // EFI_TABLE_HEADER (24 bytes)
+/// data.extend_from_slice(&0x5452415020494645u64.to_le_bytes()); // "EFI PART"
+/// data.extend_from_slice(&0x00010000u32.to_le_bytes()); // revision
+/// data.extend_from_slice(&92u32.to_le_bytes());          // header_size
+/// data.extend_from_slice(&0u32.to_le_bytes());           // header_crc32
+/// data.extend_from_slice(&0u32.to_le_bytes());           // reserved
+/// // Remaining EFI_PARTITION_TABLE_HEADER fields
+/// data.extend_from_slice(&1u64.to_le_bytes());           // my_lba
+/// data.extend_from_slice(&u64::MAX.to_le_bytes());       // alternate_lba
+/// data.extend_from_slice(&34u64.to_le_bytes());          // first_usable_lba
+/// data.extend_from_slice(&(u64::MAX - 34).to_le_bytes()); // last_usable_lba
+/// data.extend_from_slice(&[0u8; 16]);                    // disk_guid
+/// data.extend_from_slice(&2u64.to_le_bytes());           // partition_entry_lba
+/// data.extend_from_slice(&128u32.to_le_bytes());         // num_partition_entries
+/// data.extend_from_slice(&128u32.to_le_bytes());         // size_of_partition_entry
+/// data.extend_from_slice(&0u32.to_le_bytes());           // crc32
+/// // UEFI_GPT_DATA-specific: NumberOfPartitions
+/// data.extend_from_slice(&0u64.to_le_bytes());           // no partitions
+///
+/// let gpt = UefiGptData::parse(&data).unwrap();
+/// assert_eq!(gpt.number_of_partitions, 0);
+/// assert!(gpt.partitions.is_empty());
+/// ```
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UefiGptData {
+    /// The GUID Partition Table header.
+    pub uefi_partition_header: EfiPartitionTableHeader,
+    /// Number of valid (non-empty) partitions recorded in this event.
+    pub number_of_partitions: u64,
+    /// The valid partition entries, one per measured partition.
+    pub partitions: Vec<EfiPartitionEntry>,
+}
+
+impl UefiGptData {
+    /// Parse a [`UefiGptData`] from raw event-data bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ParseError`] if the data is truncated or malformed.
+    pub fn parse(data: &[u8]) -> Result<Self, ParseError> {
+        let mut c = Cursor::new(data);
+
+        // ── EFI_TABLE_HEADER (24 bytes) ───────────────────────────────────
+        let header_sig_bytes = c.read_bytes(8)?;
+        let header_signature = to_hex(header_sig_bytes);
+        let header_revision = c.read_u32_le()?;
+        let header_size = c.read_u32_le()?;
+        let header_crc32 = c.read_u32_le()?;
+        let _ = c.read_u32_le()?; // Reserved — must be zero per UEFI spec.
+                                  // Validation is intentionally skipped here:
+                                  // `UefiGptData::parse` returns `Result`, not
+                                  // a (value, warnings) pair, so non-fatal
+                                  // anomalies in sub-parsers cannot be surfaced
+                                  // as `ParseWarning`s without an API change.
+                                  // Callers that need strict validation should
+                                  // inspect `EfiTableHeader.header_crc32`.
+
+        // ── Remaining EFI_PARTITION_TABLE_HEADER fields (68 bytes) ───────
+        let my_lba = c.read_u64_le()?;
+        let alternate_lba = c.read_u64_le()?;
+        let first_usable_lba = c.read_u64_le()?;
+        let last_usable_lba = c.read_u64_le()?;
+        let disk_guid_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+        let disk_guid = Guid::from_bytes(disk_guid_bytes);
+        let partition_entry_lba = c.read_u64_le()?;
+        let number_of_partition_entries = c.read_u32_le()?;
+        let size_of_partition_entry = c.read_u32_le()?;
+        let partition_entry_array_crc32 = c.read_u32_le()?;
+
+        let uefi_partition_header = EfiPartitionTableHeader {
+            header: EfiTableHeader {
+                signature: header_signature,
+                revision: header_revision,
+                header_size,
+                header_crc32,
+            },
+            my_lba,
+            alternate_lba,
+            first_usable_lba,
+            last_usable_lba,
+            disk_guid,
+            partition_entry_lba,
+            number_of_partition_entries,
+            size_of_partition_entry,
+            partition_entry_array_crc32,
+        };
+
+        // ── UEFI_GPT_DATA: NumberOfPartitions + entries ───────────────────
+        let number_of_partitions = c.read_u64_le()?;
+
+        // Use the size reported by the header; fall back to the UEFI standard
+        // of 128 bytes if the header value is zero.
+        let entry_size = if size_of_partition_entry > 0 {
+            size_of_partition_entry as usize
+        } else {
+            128
+        };
+
+        let mut partitions = Vec::with_capacity(number_of_partitions as usize);
+        for _ in 0..number_of_partitions {
+            let entry_bytes = c.read_bytes(entry_size)?;
+            partitions.push(EfiPartitionEntry::parse(entry_bytes)?);
+        }
+
+        Ok(Self {
+            uefi_partition_header,
+            number_of_partitions,
+            partitions,
+        })
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Startup locality event  (EV_NO_ACTION with "StartupLocality\0" signature)
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -710,5 +948,119 @@ mod tests {
         assert_eq!(tables.table_description, "ACPI Tables");
         assert_eq!(tables.tables.len(), 1);
         assert_eq!(tables.tables[0].vendor_table, 0xCAFE);
+    }
+
+    // ── Helper to build a minimal UEFI_GPT_DATA payload ──────────────────────
+
+    /// Build the 92-byte `EFI_PARTITION_TABLE_HEADER` part of `UEFI_GPT_DATA`.
+    fn build_gpt_header(size_of_partition_entry: u32) -> Vec<u8> {
+        let mut d = Vec::new();
+        // EFI_TABLE_HEADER (24 bytes)
+        d.extend_from_slice(&0x5452415020494645u64.to_le_bytes()); // "EFI PART"
+        d.extend_from_slice(&0x00010000u32.to_le_bytes()); // revision 1.0
+        d.extend_from_slice(&92u32.to_le_bytes()); // header_size
+        d.extend_from_slice(&0u32.to_le_bytes()); // header_crc32
+        d.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        // Remaining EFI_PARTITION_TABLE_HEADER (68 bytes)
+        d.extend_from_slice(&1u64.to_le_bytes()); // my_lba
+        d.extend_from_slice(&u64::MAX.to_le_bytes()); // alternate_lba
+        d.extend_from_slice(&34u64.to_le_bytes()); // first_usable_lba
+        d.extend_from_slice(&(u64::MAX - 34).to_le_bytes()); // last_usable_lba
+        d.extend_from_slice(&[0xAAu8; 16]); // disk_guid
+        d.extend_from_slice(&2u64.to_le_bytes()); // partition_entry_lba
+        d.extend_from_slice(&128u32.to_le_bytes()); // number_of_partition_entries
+        d.extend_from_slice(&size_of_partition_entry.to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes()); // crc32
+        d
+    }
+
+    /// Build a 128-byte `EFI_PARTITION_ENTRY` (standard size).
+    fn build_partition_entry(name: &str) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(&[0x28u8; 16]); // PartitionTypeGUID
+        d.extend_from_slice(&[0x29u8; 16]); // UniquePartitionGUID
+        d.extend_from_slice(&2048u64.to_le_bytes()); // StartingLBA
+        d.extend_from_slice(&1048575u64.to_le_bytes()); // EndingLBA
+        d.extend_from_slice(&0u64.to_le_bytes()); // Attributes
+        // PartitionName: CHAR16[36] = 72 bytes
+        let mut name_bytes = Vec::with_capacity(72);
+        for ch in name.encode_utf16() {
+            name_bytes.extend_from_slice(&ch.to_le_bytes());
+        }
+        // Pad to 72 bytes with zeros
+        name_bytes.resize(72, 0);
+        d.extend_from_slice(&name_bytes);
+        d
+    }
+
+    #[test]
+    fn uefi_gpt_data_parse_no_partitions() {
+        let mut data = build_gpt_header(128);
+        data.extend_from_slice(&0u64.to_le_bytes()); // NumberOfPartitions = 0
+
+        let gpt = UefiGptData::parse(&data).unwrap();
+        assert_eq!(gpt.number_of_partitions, 0);
+        assert!(gpt.partitions.is_empty());
+        assert_eq!(gpt.uefi_partition_header.my_lba, 1);
+        assert_eq!(gpt.uefi_partition_header.size_of_partition_entry, 128);
+    }
+
+    #[test]
+    fn uefi_gpt_data_parse_with_partition() {
+        let mut data = build_gpt_header(128);
+        data.extend_from_slice(&1u64.to_le_bytes()); // NumberOfPartitions = 1
+        data.extend_from_slice(&build_partition_entry("EFI System"));
+
+        let gpt = UefiGptData::parse(&data).unwrap();
+        assert_eq!(gpt.number_of_partitions, 1);
+        assert_eq!(gpt.partitions.len(), 1);
+        assert_eq!(gpt.partitions[0].partition_name, "EFI System");
+        assert_eq!(gpt.partitions[0].starting_lba, 2048);
+        assert_eq!(gpt.partitions[0].ending_lba, 1048575);
+    }
+
+    #[test]
+    fn uefi_gpt_data_parse_two_partitions() {
+        let mut data = build_gpt_header(128);
+        data.extend_from_slice(&2u64.to_le_bytes()); // NumberOfPartitions = 2
+        data.extend_from_slice(&build_partition_entry("EFI System"));
+        data.extend_from_slice(&build_partition_entry("Linux root"));
+
+        let gpt = UefiGptData::parse(&data).unwrap();
+        assert_eq!(gpt.number_of_partitions, 2);
+        assert_eq!(gpt.partitions[0].partition_name, "EFI System");
+        assert_eq!(gpt.partitions[1].partition_name, "Linux root");
+    }
+
+    #[test]
+    fn uefi_gpt_data_parse_truncated_returns_error() {
+        // Only the GPT header, no NumberOfPartitions field.
+        let data = build_gpt_header(128);
+        assert!(UefiGptData::parse(&data).is_err());
+    }
+
+    #[test]
+    fn uefi_gpt_data_parse_disk_guid() {
+        let mut data = build_gpt_header(128);
+        data.extend_from_slice(&0u64.to_le_bytes()); // no partitions
+
+        let gpt = UefiGptData::parse(&data).unwrap();
+        // disk_guid bytes are all 0xAA (from build_gpt_header).
+        // Guid::from_bytes serialises them in mixed-endian; just check it's non-zero.
+        let guid_str = format!("{}", gpt.uefi_partition_header.disk_guid);
+        assert!(guid_str.contains("aa"), "disk_guid should contain 'aa': {guid_str}");
+    }
+
+    #[test]
+    fn uefi_gpt_data_header_signature_is_hex_encoded() {
+        let mut data = build_gpt_header(128);
+        data.extend_from_slice(&0u64.to_le_bytes()); // no partitions
+
+        let gpt = UefiGptData::parse(&data).unwrap();
+        // "EFI PART" as LE bytes: 45 46 49 20 50 41 52 54
+        assert_eq!(
+            gpt.uefi_partition_header.header.signature,
+            "4546492050415254"
+        );
     }
 }

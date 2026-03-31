@@ -94,6 +94,28 @@ pub enum ParseWarning {
         /// Number of digests actually present in this event.
         actual: usize,
     },
+
+    /// The digest recorded in an aggregated event does not match the expected
+    /// hash of the event-data payload.
+    ///
+    /// The TCG PC Client Platform Firmware Profile Specification (§10.2)
+    /// mandates that for certain event types — including `EV_EFI_GPT_EVENT`
+    /// and `EV_EFI_VARIABLE_*` — the recorded digest **must** equal the hash
+    /// of the raw event-data bytes.  These are *aggregated* events: the
+    /// event-data structure combines multiple component measurements (e.g.,
+    /// all GPT partition entries, or a variable GUID + name + value) into a
+    /// single serialised payload, and the digest covers that entire payload.
+    ///
+    /// A mismatch means the firmware recorded an incorrect digest, or the log
+    /// has been tampered with after the fact.
+    EventDataDigestMismatch {
+        /// The algorithm for which the mismatch was detected.
+        algorithm: HashAlgorithmId,
+        /// The digest recorded in the event (hex-encoded).
+        recorded: String,
+        /// The digest expected from hashing the event-data bytes (hex-encoded).
+        expected: String,
+    },
 }
 
 #[cfg(test)]
@@ -160,5 +182,19 @@ mod tests {
         };
         let json = serde_json::to_string(&w).unwrap();
         assert!(json.contains("digest_count_mismatch"));
+    }
+
+    #[test]
+    fn event_data_digest_mismatch_serializes() {
+        let w = ParseWarning::EventDataDigestMismatch {
+            algorithm: HashAlgorithmId::Sha256,
+            recorded: "aa".repeat(32),
+            expected: "bb".repeat(32),
+        };
+        let json = serde_json::to_string(&w).unwrap();
+        assert!(json.contains("event_data_digest_mismatch"));
+        assert!(json.contains("sha256"));
+        assert!(json.contains(&"aa".repeat(32)));
+        assert!(json.contains(&"bb".repeat(32)));
     }
 }

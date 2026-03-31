@@ -107,8 +107,9 @@ pub mod warning;
 pub use error::ParseError;
 pub use event::{DigestValue, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 pub use event_data::{
-    AlgorithmSize, EfiConfigurationTable, SpecIdEvent, StartupLocality, UefiFirmwareBlob,
-    UefiFirmwareBlob2, UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
+    AlgorithmSize, EfiConfigurationTable, EfiPartitionEntry, EfiPartitionTableHeader,
+    EfiTableHeader, SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2,
+    UefiGptData, UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
 };
 pub use parser::{EventDataParser, TcgLogParser};
 pub use pcr::PcrBank;
