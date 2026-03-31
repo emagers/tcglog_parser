@@ -9,7 +9,7 @@ use crate::event_data::{
     SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2, UefiGptData,
     UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
 };
-use crate::pcr::{MAX_PCR_INDEX, PcrState, separator_digests};
+use crate::pcr::{MAX_PCR_INDEX, PcrState, hash_bytes, separator_digests};
 use crate::types::{EventType, HashAlgorithmId, to_hex};
 use crate::warning::ParseWarning;
 
@@ -366,6 +366,39 @@ impl TcgLogParser {
                         digest: dv.digest.clone(),
                         event_type,
                     });
+                }
+            }
+        }
+
+        // ── Aggregated-event digest verification ──────────────────────────
+        // The TCG PFP spec (§10.2) mandates that for the following event types
+        // the recorded digest MUST equal Hash(event-data bytes), because the
+        // event data IS the aggregated payload that was measured:
+        //
+        //   • EV_EFI_VARIABLE_*   — the UEFI_VARIABLE_DATA structure combines
+        //     the variable GUID, name, and value into one measured blob.
+        //   • EV_EFI_GPT_EVENT    — the UEFI_GPT_DATA structure aggregates the
+        //     GPT header together with all valid partition entries.
+        //
+        // Any mismatch indicates incorrect firmware behaviour or log tampering.
+        if matches!(
+            event_type,
+            EventType::EfiVariableDriverConfig
+                | EventType::EfiVariableBoot
+                | EventType::EfiVariableBoot2
+                | EventType::EfiVariableAuthority
+                | EventType::EfiGptEvent
+        ) {
+            for dv in &digests {
+                if let Some(expected_bytes) = hash_bytes(dv.hash_alg, &event_bytes) {
+                    let expected_hex = to_hex(&expected_bytes);
+                    if dv.digest != expected_hex {
+                        warnings.push(ParseWarning::EventDataDigestMismatch {
+                            algorithm: dv.hash_alg,
+                            recorded: dv.digest.clone(),
+                            expected: expected_hex,
+                        });
+                    }
                 }
             }
         }
@@ -1357,5 +1390,145 @@ mod tests {
         let data = vec![b'H', 0, b'I', 0, 0xFF]; // "HI" + orphan byte
         let v = parse_builtin_event_data(EventType::EfiHcrtmEvent, &data, 8);
         assert_eq!(v["event"], "HI");
+    }
+
+    // ── Aggregated-event digest verification ─────────────────────────────────
+
+    /// Build a TCG 2.0 event with a real (computed) SHA-256 digest over
+    /// `event_data`, for use in digest-verification tests.
+    fn build_tcg2_event_with_real_digest(
+        pcr_index: u32,
+        event_type_raw: u32,
+        event_data: &[u8],
+    ) -> Vec<u8> {
+        let digest = crate::pcr::hash_bytes(HashAlgorithmId::Sha256, event_data).unwrap();
+        let mut ev = Vec::new();
+        ev.extend_from_slice(&pcr_index.to_le_bytes());
+        ev.extend_from_slice(&event_type_raw.to_le_bytes());
+        ev.extend_from_slice(&1u32.to_le_bytes()); // digest_count
+        ev.extend_from_slice(&0x000Bu16.to_le_bytes()); // SHA-256
+        ev.extend_from_slice(&digest);
+        ev.extend_from_slice(&(event_data.len() as u32).to_le_bytes());
+        ev.extend_from_slice(event_data);
+        ev
+    }
+
+    #[test]
+    fn efi_variable_correct_digest_no_warning() {
+        // Build a UEFI_VARIABLE_DATA for "SecureBoot" with value 0x01.
+        let name_utf16: Vec<u8> = "SecureBoot"
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let mut ev_data = Vec::new();
+        ev_data.extend_from_slice(&[0u8; 16]); // GUID
+        ev_data.extend_from_slice(&10u64.to_le_bytes()); // name len
+        ev_data.extend_from_slice(&1u64.to_le_bytes()); // data len
+        ev_data.extend_from_slice(&name_utf16);
+        ev_data.push(0x01); // value
+
+        let spec = spec_id_bytes(&[(0x000B, 32)]);
+        let mut log = first_event_bytes(&spec);
+        log.extend_from_slice(&build_tcg2_event_with_real_digest(
+            7,          // PCR 7 is used for SecureBoot
+            0x80000001, // EV_EFI_VARIABLE_DRIVER_CONFIG
+            &ev_data,
+        ));
+
+        let parsed = TcgLogParser::new().parse(&log).unwrap();
+        let ev = &parsed.events[0];
+        assert!(
+            !ev.warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::EventDataDigestMismatch { .. })),
+            "correct digest must not produce a mismatch warning; got: {:?}",
+            ev.warnings
+        );
+    }
+
+    #[test]
+    fn efi_variable_wrong_digest_produces_warning() {
+        // Build an EV_EFI_VARIABLE_DRIVER_CONFIG with an all-zero digest —
+        // deliberately wrong to trigger the mismatch warning.
+        let mut ev_data = Vec::new();
+        ev_data.extend_from_slice(&[0u8; 16]); // GUID
+        ev_data.extend_from_slice(&0u64.to_le_bytes()); // name len 0
+        ev_data.extend_from_slice(&0u64.to_le_bytes()); // data len 0
+
+        let spec = spec_id_bytes(&[(0x000B, 32)]);
+        let mut log = first_event_bytes(&spec);
+        // Use append_tcg2_event which always writes an all-zero digest.
+        append_tcg2_event(&mut log, 7, 0x80000001, &[(0x000B, 32)], &ev_data);
+
+        let parsed = TcgLogParser::new().parse(&log).unwrap();
+        let ev = &parsed.events[0];
+        assert!(
+            ev.warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::EventDataDigestMismatch { algorithm: HashAlgorithmId::Sha256, .. })),
+            "all-zero digest for EV_EFI_VARIABLE must trigger EventDataDigestMismatch; got: {:?}",
+            ev.warnings
+        );
+    }
+
+    #[test]
+    fn gpt_event_correct_digest_no_warning() {
+        let gpt_data = build_uefi_gpt_data(&[("EFI System", 2048, 411647)]);
+
+        let spec = spec_id_bytes(&[(0x000B, 32)]);
+        let mut log = first_event_bytes(&spec);
+        log.extend_from_slice(&build_tcg2_event_with_real_digest(
+            5,          // PCR 5 is used for GPT
+            0x80000006, // EV_EFI_GPT_EVENT
+            &gpt_data,
+        ));
+
+        let parsed = TcgLogParser::new().parse(&log).unwrap();
+        let ev = &parsed.events[0];
+        assert!(
+            !ev.warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::EventDataDigestMismatch { .. })),
+            "correct GPT digest must not produce a mismatch warning; got: {:?}",
+            ev.warnings
+        );
+    }
+
+    #[test]
+    fn gpt_event_wrong_digest_produces_warning() {
+        let gpt_data = build_uefi_gpt_data(&[("Linux root", 411648, 976773119)]);
+
+        let spec = spec_id_bytes(&[(0x000B, 32)]);
+        let mut log = first_event_bytes(&spec);
+        // append_tcg2_event always writes an all-zero digest → mismatch.
+        append_tcg2_event(&mut log, 5, 0x80000006, &[(0x000B, 32)], &gpt_data);
+
+        let parsed = TcgLogParser::new().parse(&log).unwrap();
+        let ev = &parsed.events[0];
+        assert!(
+            ev.warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::EventDataDigestMismatch { algorithm: HashAlgorithmId::Sha256, .. })),
+            "all-zero digest for EV_EFI_GPT_EVENT must trigger EventDataDigestMismatch; got: {:?}",
+            ev.warnings
+        );
+    }
+
+    #[test]
+    fn non_aggregated_event_with_wrong_digest_no_mismatch_warning() {
+        // EV_POST_CODE is NOT in the aggregated-event set, so even an all-zero
+        // digest should NOT trigger EventDataDigestMismatch.
+        let spec = spec_id_bytes(&[(0x000B, 32)]);
+        let mut log = first_event_bytes(&spec);
+        append_tcg2_event(&mut log, 0, 0x00000001, &[(0x000B, 32)], b"POST_CODE");
+
+        let parsed = TcgLogParser::new().parse(&log).unwrap();
+        let ev = &parsed.events[0];
+        assert!(
+            !ev.warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::EventDataDigestMismatch { .. })),
+            "EV_POST_CODE must not produce an EventDataDigestMismatch warning"
+        );
     }
 }

@@ -492,9 +492,10 @@ impl UefiHandoffTables2 {
 /// Corresponds to `EFI_TABLE_HEADER` in the UEFI specification.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EfiTableHeader {
-    /// Table identifier, lowercase hex-encoded.  For a GPT partition header
-    /// this is the ASCII string `"EFI PART"` encoded as a little-endian
-    /// `UINT64` (`0x5452415020494645`), producing the hex string
+    /// Table identifier, lowercase hex-encoded.  The on-disk bytes are
+    /// hex-encoded in order, without endian conversion.  For a GPT partition
+    /// header the signature is the ASCII string `"EFI PART"` (bytes
+    /// `45 46 49 20 50 41 52 54`), yielding the hex string
     /// `"4546492050415254"`.
     pub signature: String,
     /// Revision number of the structure.
@@ -657,6 +658,13 @@ impl UefiGptData {
         let header_size = c.read_u32_le()?;
         let header_crc32 = c.read_u32_le()?;
         let _ = c.read_u32_le()?; // Reserved — must be zero per UEFI spec.
+                                  // Validation is intentionally skipped here:
+                                  // `UefiGptData::parse` returns `Result`, not
+                                  // a (value, warnings) pair, so non-fatal
+                                  // anomalies in sub-parsers cannot be surfaced
+                                  // as `ParseWarning`s without an API change.
+                                  // Callers that need strict validation should
+                                  // inspect `EfiTableHeader.header_crc32`.
 
         // ── Remaining EFI_PARTITION_TABLE_HEADER fields (68 bytes) ───────
         let my_lba = c.read_u64_le()?;
