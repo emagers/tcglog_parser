@@ -6,8 +6,8 @@
 use crate::error::{Cursor, ParseError};
 use crate::event::{DigestValue, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 use crate::event_data::{
-    SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables,
-    UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
+    SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2, UefiGptData,
+    UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
 };
 use crate::pcr::{MAX_PCR_INDEX, PcrState, separator_digests};
 use crate::types::{EventType, HashAlgorithmId, to_hex};
@@ -509,6 +509,12 @@ fn parse_builtin_event_data(
             Err(_) => raw_hex(data),
         },
 
+        // EV_EFI_GPT_EVENT: aggregated GPT partition table data.
+        EventType::EfiGptEvent => match UefiGptData::parse(data) {
+            Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
+            Err(_) => raw_hex(data),
+        },
+
         // EV_EFI_ACTION and EV_ACTION: the payload is a UTF-8 / ASCII string.
         EventType::EfiAction | EventType::Action => {
             let text = String::from_utf8_lossy(data).into_owned();
@@ -525,6 +531,20 @@ fn parse_builtin_event_data(
                 .trim_matches('\0')
                 .to_string();
             serde_json::json!({ "version": text })
+        }
+
+        // EV_EFI_HCRTM_EVENT: UTF-16LE string per TCG PFP spec.
+        // `chunks_exact(2)` silently drops a trailing orphan byte if the
+        // payload has an odd length — the same behaviour used for SCrtmVersion.
+        EventType::EfiHcrtmEvent => {
+            let u16s: Vec<u16> = data
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            let text = String::from_utf16_lossy(&u16s)
+                .trim_matches('\0')
+                .to_string();
+            serde_json::json!({ "event": text })
         }
 
         // EV_SEPARATOR: 4-byte value.
@@ -1219,5 +1239,123 @@ mod tests {
         assert_ne!(sha256.pcrs[&0], "0".repeat(64));
         // PCR 1 should still be all-zeros (untouched).
         assert_eq!(sha256.pcrs[&1], "0".repeat(64));
+    }
+
+    // ── EFI GPT event parsing ─────────────────────────────────────────────────
+
+    /// Build a minimal `UEFI_GPT_DATA` payload with the given number of partitions.
+    fn build_uefi_gpt_data(partitions: &[(&str, u64, u64)]) -> Vec<u8> {
+        let mut data = Vec::new();
+        // EFI_TABLE_HEADER (24 bytes)
+        data.extend_from_slice(&0x5452415020494645u64.to_le_bytes()); // "EFI PART"
+        data.extend_from_slice(&0x00010000u32.to_le_bytes()); // revision
+        data.extend_from_slice(&92u32.to_le_bytes()); // header_size
+        data.extend_from_slice(&0u32.to_le_bytes()); // crc32
+        data.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        // Remaining EFI_PARTITION_TABLE_HEADER fields
+        data.extend_from_slice(&1u64.to_le_bytes()); // my_lba
+        data.extend_from_slice(&u64::MAX.to_le_bytes()); // alternate_lba
+        data.extend_from_slice(&34u64.to_le_bytes()); // first_usable_lba
+        data.extend_from_slice(&(u64::MAX - 34).to_le_bytes()); // last_usable_lba
+        data.extend_from_slice(&[0u8; 16]); // disk_guid (zeros)
+        data.extend_from_slice(&2u64.to_le_bytes()); // partition_entry_lba
+        data.extend_from_slice(&128u32.to_le_bytes()); // num_partition_entries
+        data.extend_from_slice(&128u32.to_le_bytes()); // size_of_partition_entry = 128
+        data.extend_from_slice(&0u32.to_le_bytes()); // partition_entry_array_crc32
+        // NumberOfPartitions
+        data.extend_from_slice(&(partitions.len() as u64).to_le_bytes());
+        // Partition entries (128 bytes each)
+        for &(name, start, end) in partitions {
+            data.extend_from_slice(&[0u8; 16]); // PartitionTypeGUID
+            data.extend_from_slice(&[0u8; 16]); // UniquePartitionGUID
+            data.extend_from_slice(&start.to_le_bytes());
+            data.extend_from_slice(&end.to_le_bytes());
+            data.extend_from_slice(&0u64.to_le_bytes()); // attributes
+            // PartitionName CHAR16[36] = 72 bytes
+            let mut name_bytes = Vec::with_capacity(72);
+            for ch in name.encode_utf16() {
+                name_bytes.extend_from_slice(&ch.to_le_bytes());
+            }
+            name_bytes.resize(72, 0);
+            data.extend_from_slice(&name_bytes);
+        }
+        data
+    }
+
+    #[test]
+    fn builtin_parser_gpt_event_no_partitions() {
+        let data = build_uefi_gpt_data(&[]);
+        let v = parse_builtin_event_data(EventType::EfiGptEvent, &data, 8);
+        assert_eq!(v["number_of_partitions"], 0u64);
+        assert!(v["partitions"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn builtin_parser_gpt_event_one_partition() {
+        let data = build_uefi_gpt_data(&[("EFI System", 2048, 1048575)]);
+        let v = parse_builtin_event_data(EventType::EfiGptEvent, &data, 8);
+        assert_eq!(v["number_of_partitions"], 1u64);
+        let parts = v["partitions"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0]["partition_name"], "EFI System");
+        assert_eq!(parts[0]["starting_lba"], 2048u64);
+        assert_eq!(parts[0]["ending_lba"], 1048575u64);
+    }
+
+    #[test]
+    fn builtin_parser_gpt_event_two_partitions() {
+        let data = build_uefi_gpt_data(&[("EFI System", 2048, 411647), ("Linux root", 411648, 976773119)]);
+        let v = parse_builtin_event_data(EventType::EfiGptEvent, &data, 8);
+        let parts = v["partitions"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["partition_name"], "EFI System");
+        assert_eq!(parts[1]["partition_name"], "Linux root");
+    }
+
+    #[test]
+    fn builtin_parser_gpt_event_truncated_falls_back_to_raw() {
+        // Provide only 10 bytes — too short to be a valid UEFI_GPT_DATA.
+        let data = [0u8; 10];
+        let v = parse_builtin_event_data(EventType::EfiGptEvent, &data, 8);
+        // Should fall back to {"raw": "<hex>"} on parse failure.
+        assert!(v.get("raw").is_some(), "expected raw fallback, got: {v}");
+    }
+
+    #[test]
+    fn gpt_event_via_full_log_parse() {
+        // Build a minimal TCG 2.0 log with one EV_EFI_GPT_EVENT.
+        let spec = spec_id_bytes(&[(0x000B, 32)]);
+        let mut log = first_event_bytes(&spec);
+        let gpt_data = build_uefi_gpt_data(&[("Data", 2048, 4096)]);
+        append_tcg2_event(&mut log, 5, 0x80000006, &[(0x000B, 32)], &gpt_data);
+
+        let parsed = TcgLogParser::new().parse(&log).unwrap();
+        assert_eq!(parsed.events.len(), 1);
+        let ev = &parsed.events[0];
+        assert_eq!(ev.event_type, EventType::EfiGptEvent);
+        assert_eq!(ev.event_data["number_of_partitions"], 1u64);
+        assert_eq!(ev.event_data["partitions"][0]["partition_name"], "Data");
+    }
+
+    // ── EFI HCRTM event parsing ───────────────────────────────────────────────
+
+    #[test]
+    fn builtin_parser_hcrtm_event() {
+        // "HCRTM" encoded as UTF-16LE + null terminator.
+        let data: Vec<u8> = "HCRTM\0"
+            .encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .collect();
+        let v = parse_builtin_event_data(EventType::EfiHcrtmEvent, &data, 8);
+        // Null terminator must be stripped.
+        assert_eq!(v["event"], "HCRTM");
+    }
+
+    #[test]
+    fn builtin_parser_hcrtm_event_odd_byte_count_handled_gracefully() {
+        // Odd number of bytes: chunks_exact(2) silently drops the trailing byte.
+        let data = vec![b'H', 0, b'I', 0, 0xFF]; // "HI" + orphan byte
+        let v = parse_builtin_event_data(EventType::EfiHcrtmEvent, &data, 8);
+        assert_eq!(v["event"], "HI");
     }
 }
