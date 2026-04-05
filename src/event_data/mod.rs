@@ -12,7 +12,6 @@ use crate::error::{Cursor, ParseError};
 use crate::types::{Guid, to_hex};
 use serde::{Deserialize, Serialize};
 use sha1::Digest as Sha1Digest;
-use x509_parser::prelude::*;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SpecID event (TCG 2.0 log header)
@@ -174,17 +173,215 @@ pub struct CertificateInfo {
 
 /// Try to decode a DER-encoded X.509 certificate into a [`CertificateInfo`].
 ///
+/// Uses a minimal inline DER walker that extracts only the fields we need
+/// (serial, issuer, validity, subject) from the TBSCertificate, skipping
+/// extensions, public key, and signature parsing entirely.  This is
+/// dramatically faster than a full ASN.1/X.509 library.
+///
 /// Returns `None` if `der` is not a valid DER X.509 certificate.
 fn try_decode_x509(der: &[u8]) -> Option<CertificateInfo> {
-    let (_, cert) = X509Certificate::from_der(der).ok()?;
+    // ── Minimal DER helpers ──────────────────────────────────────────────
 
-    let subject      = cert.subject().to_string();
-    let issuer       = cert.issuer().to_string();
-    let serial_number = to_hex(cert.raw_serial());
-    let not_before   = cert.validity().not_before.to_string();
-    let not_after    = cert.validity().not_after.to_string();
+    /// Read a DER tag + length at `pos`, returning `(content_start, content_len)`.
+    /// Returns `None` on truncation.
+    fn read_tl(data: &[u8], pos: usize) -> Option<(usize, usize)> {
+        if pos >= data.len() { return None; }
+        let _tag = data[pos];
+        let mut p = pos + 1;
+        if p >= data.len() { return None; }
+        let len_byte = data[p];
+        p += 1;
+        let len = if len_byte < 0x80 {
+            len_byte as usize
+        } else {
+            let n = (len_byte & 0x7F) as usize;
+            if n == 0 || n > 4 || p + n > data.len() { return None; }
+            let mut v = 0usize;
+            for i in 0..n { v = (v << 8) | data[p + i] as usize; }
+            p += n;
+            v
+        };
+        if p + len > data.len() { return None; }
+        Some((p, len))
+    }
 
-    // SHA-1 thumbprint = SHA-1 of the raw DER bytes (same as Windows "Thumbprint").
+    /// Skip one DER TLV element starting at `pos`, returning the position
+    /// after its content.
+    fn skip_tlv(data: &[u8], pos: usize) -> Option<usize> {
+        let (start, len) = read_tl(data, pos)?;
+        Some(start + len)
+    }
+
+    /// Decode a DER `Name` (SEQUENCE OF SET OF SEQUENCE { OID, value })
+    /// into an RFC 4514-ish string like `"C=US, ST=Washington, CN=Foo"`.
+    fn decode_name(data: &[u8]) -> String {
+        // Well-known OID bytes → abbreviation.
+        // These are the encoded OID *content* bytes (without tag+length).
+        fn oid_abbrev(oid: &[u8]) -> Option<&'static str> {
+            match oid {
+                [0x55, 0x04, 0x03] => Some("CN"),
+                [0x55, 0x04, 0x06] => Some("C"),
+                [0x55, 0x04, 0x07] => Some("L"),
+                [0x55, 0x04, 0x08] => Some("ST"),
+                [0x55, 0x04, 0x0A] => Some("O"),
+                [0x55, 0x04, 0x0B] => Some("OU"),
+                [0x55, 0x04, 0x05] => Some("serialNumber"),
+                // emailAddress: 1.2.840.113549.1.9.1
+                [0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x01] => Some("emailAddress"),
+                _ => None,
+            }
+        }
+
+        let mut parts: Vec<String> = Vec::new();
+        // Iterate SET OF inside the outer SEQUENCE.
+        let (mut rdn_pos, name_end) = match read_tl(data, 0) {
+            Some((s, l)) => (s, s + l),
+            None => return String::new(),
+        };
+        while rdn_pos < name_end {
+            // Each RDN is a SET.
+            let (set_start, set_len) = match read_tl(data, rdn_pos) {
+                Some(v) => v,
+                None => break,
+            };
+            let set_end = set_start + set_len;
+            // Inside the SET: one or more SEQUENCE { OID, value }.
+            let mut atv_pos = set_start;
+            while atv_pos < set_end {
+                let (seq_start, seq_len) = match read_tl(data, atv_pos) {
+                    Some(v) => v,
+                    None => break,
+                };
+                let seq_end = seq_start + seq_len;
+                // OID
+                if seq_start < seq_end && data[seq_start] == 0x06 {
+                    let (oid_start, oid_len) = match read_tl(data, seq_start) {
+                        Some(v) => v,
+                        None => { atv_pos = seq_end; continue; }
+                    };
+                    let oid_bytes = &data[oid_start..oid_start + oid_len];
+                    let val_pos = oid_start + oid_len;
+                    // Value (skip its tag+length to get the content).
+                    if val_pos < seq_end {
+                        let (val_start, val_len) = match read_tl(data, val_pos) {
+                            Some(v) => v,
+                            None => { atv_pos = seq_end; continue; }
+                        };
+                        let val_bytes = &data[val_start..val_start + val_len];
+                        let value = String::from_utf8_lossy(val_bytes);
+                        if let Some(abbrev) = oid_abbrev(oid_bytes) {
+                            parts.push(format!("{abbrev}={value}"));
+                        } else {
+                            // Format unknown OID as dotted decimal.
+                            parts.push(format!("OID({})={value}", format_oid(oid_bytes)));
+                        }
+                    }
+                }
+                atv_pos = seq_end;
+            }
+            rdn_pos = set_end;
+        }
+        parts.join(", ")
+    }
+
+    /// Format OID content bytes as dotted-decimal (e.g. "2.5.4.3").
+    fn format_oid(bytes: &[u8]) -> String {
+        if bytes.is_empty() { return String::new(); }
+        let mut components: Vec<u32> = Vec::new();
+        // First byte encodes two components: c1 = byte/40, c2 = byte%40.
+        components.push((bytes[0] / 40) as u32);
+        components.push((bytes[0] % 40) as u32);
+        let mut val = 0u32;
+        for &b in &bytes[1..] {
+            val = (val << 7) | (b & 0x7F) as u32;
+            if b & 0x80 == 0 {
+                components.push(val);
+                val = 0;
+            }
+        }
+        components.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(".")
+    }
+
+    /// Decode a DER UTCTime or GeneralizedTime into a string matching the
+    /// format produced by the `x509-parser` crate:
+    /// `"Mon DD HH:MM:SS YYYY +00:00"` (e.g. `"Oct 19 18:41:42 2026 +00:00"`).
+    fn decode_time(data: &[u8], pos: usize) -> Option<(String, usize)> {
+        if pos >= data.len() { return None; }
+        let tag = data[pos];
+        let (start, len) = read_tl(data, pos)?;
+        let s = std::str::from_utf8(&data[start..start + len]).ok()?;
+        let (year, month, day, hour, min, sec) = if tag == 0x17 {
+            // UTCTime: YYMMDDHHMMSSZ
+            if s.len() < 13 { return None; }
+            let yy: u32 = s[0..2].parse().ok()?;
+            let year = if yy >= 50 { 1900 + yy } else { 2000 + yy };
+            (year, &s[2..4], &s[4..6], &s[6..8], &s[8..10], &s[10..12])
+        } else if tag == 0x18 {
+            // GeneralizedTime: YYYYMMDDHHMMSSZ
+            if s.len() < 15 { return None; }
+            let year: u32 = s[0..4].parse().ok()?;
+            (year, &s[4..6], &s[6..8], &s[8..10], &s[10..12], &s[12..14])
+        } else {
+            return None;
+        };
+        let mon: u32 = month.parse().ok()?;
+        let d: u32 = day.parse().ok()?;
+        let month_name = match mon {
+            1 => "Jan", 2 => "Feb", 3 => "Mar", 4 => "Apr",
+            5 => "May", 6 => "Jun", 7 => "Jul", 8 => "Aug",
+            9 => "Sep", 10 => "Oct", 11 => "Nov", 12 => "Dec",
+            _ => return None,
+        };
+        // x509-parser uses "%b %e" which pads day < 10 with a leading space.
+        let formatted = format!("{month_name} {d:2} {hour}:{min}:{sec} {year} +00:00");
+        Some((formatted, start + len))
+    }
+
+    // ── Main parse logic ─────────────────────────────────────────────────
+    // Certificate ::= SEQUENCE { tbsCertificate, ... }
+    let (cert_start, _cert_len) = read_tl(der, 0)?;
+    // TBSCertificate ::= SEQUENCE { [0]version?, serial, sig, issuer, validity, subject, ... }
+    let (tbs_start, _tbs_len) = read_tl(der, cert_start)?;
+
+    let mut pos = tbs_start;
+
+    // [0] EXPLICIT version (optional — present if first byte is 0xA0).
+    if pos < der.len() && der[pos] == 0xA0 {
+        pos = skip_tlv(der, pos)?;
+    }
+
+    // serialNumber INTEGER
+    if pos >= der.len() || der[pos] != 0x02 { return None; }
+    let (serial_start, serial_len) = read_tl(der, pos)?;
+    let serial_bytes = &der[serial_start..serial_start + serial_len];
+    // Strip leading zero byte used for positive-sign padding.
+    let serial_trimmed = if serial_bytes.len() > 1 && serial_bytes[0] == 0x00 {
+        &serial_bytes[1..]
+    } else {
+        serial_bytes
+    };
+    let serial_number = to_hex(serial_trimmed);
+    pos = serial_start + serial_len;
+
+    // signature AlgorithmIdentifier — skip.
+    pos = skip_tlv(der, pos)?;
+
+    // issuer Name
+    let (issuer_start, issuer_len) = read_tl(der, pos)?;
+    let issuer = decode_name(&der[pos..issuer_start + issuer_len]);
+    pos = issuer_start + issuer_len;
+
+    // validity Validity ::= SEQUENCE { notBefore, notAfter }
+    let (val_start, _val_len) = read_tl(der, pos)?;
+    let (not_before, after_nb) = decode_time(der, val_start)?;
+    let (not_after, _) = decode_time(der, after_nb)?;
+    pos = val_start + _val_len;
+
+    // subject Name
+    let (subj_start, subj_len) = read_tl(der, pos)?;
+    let subject = decode_name(&der[pos..subj_start + subj_len]);
+
+    // SHA-1 thumbprint of the full DER certificate.
     let thumbprint_sha1 = to_hex(&sha1::Sha1::digest(der));
 
     Some(CertificateInfo {
