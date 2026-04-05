@@ -5,6 +5,9 @@
 //! selects the correct parser based on the event type; callers typically do not
 //! need to use these types directly.
 
+pub mod wbcl;
+pub use wbcl::WbclEventData;
+
 use crate::error::{Cursor, ParseError};
 use crate::types::{Guid, to_hex};
 use serde::{Deserialize, Serialize};

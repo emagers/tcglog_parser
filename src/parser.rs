@@ -7,7 +7,7 @@ use crate::error::{Cursor, ParseError};
 use crate::event::{DigestValue, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 use crate::event_data::{
     SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables,
-    UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
+    UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData, WbclEventData,
 };
 use crate::pcr::{MAX_PCR_INDEX, PcrState, separator_digests};
 use crate::types::{EventType, HashAlgorithmId, to_hex};
@@ -505,6 +505,12 @@ fn parse_builtin_event_data(
         },
 
         EventType::EfiHandoffTables2 => match UefiHandoffTables2::parse(data, uintn_size) {
+            Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
+            Err(_) => raw_hex(data),
+        },
+
+        // EV_EVENT_TAG: Windows Boot Configuration Log (WBCL) / SIPA events.
+        EventType::EventTag => match WbclEventData::parse(data) {
             Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
             Err(_) => raw_hex(data),
         },
