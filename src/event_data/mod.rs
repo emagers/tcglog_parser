@@ -531,6 +531,8 @@ fn parse_signature_lists(data: &[u8]) -> Option<Vec<EfiSignatureList>> {
         let mut entries = Vec::new();
 
         if sig_size >= 17 && entries_start < entries_end {
+            let entry_count = (entries_end - entries_start) / sig_size;
+            entries.reserve(entry_count);
             let mut ep = entries_start;
             while ep + sig_size <= entries_end {
                 let owner_bytes: [u8; 16] = data[ep..ep + 16].try_into().unwrap();

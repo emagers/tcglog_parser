@@ -327,7 +327,7 @@ impl TcgLogParser {
         // ── EV_NO_ACTION: digests MUST be all zeros ───────────────────────
         if event_type == EventType::NoAction {
             for dv in &digests {
-                if dv.digest.chars().any(|c| c != '0') {
+                if dv.digest.iter().any(|&b| b != 0) {
                     warnings.push(ParseWarning::NonZeroNoActionDigest {
                         algorithm: dv.hash_alg,
                     });
@@ -358,12 +358,12 @@ impl TcgLogParser {
                     .iter()
                     .find(|(alg, _)| *alg == dv.hash_alg)
                     .and_then(|(_, pair)| pair.as_ref())
-                    && (dv.digest == sep_pair.0 || dv.digest == sep_pair.1)
+                    && (dv.digest_hex() == sep_pair.0 || dv.digest_hex() == sep_pair.1)
                 {
                     warnings.push(ParseWarning::SuspiciousSeparatorDigest {
                         pcr_index,
                         algorithm: dv.hash_alg,
-                        digest: dv.digest.clone(),
+                        digest: dv.digest_hex(),
                         event_type,
                     });
                 }
@@ -373,8 +373,7 @@ impl TcgLogParser {
         // ── PCR extension (skip EV_NO_ACTION) ─────────────────────────────
         if event_type != EventType::NoAction && pcr_index <= MAX_PCR_INDEX {
             for dv in &digests {
-                let digest_bytes = hex_decode(&dv.digest);
-                pcr_state.extend(pcr_index, dv.hash_alg, &digest_bytes);
+                pcr_state.extend(pcr_index, dv.hash_alg, &dv.digest);
             }
         }
 

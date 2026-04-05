@@ -1004,8 +1004,17 @@ impl WbclEventData {
 /// header), matching the behaviour of the reference `PcpToolDisplaySIPA`
 /// C implementation (`while(cbWBCLIntern > (2 * sizeof(UINT32)))`).
 fn parse_sipa_events(data: &[u8]) -> Result<Vec<SipaEvent>, ParseError> {
+    // Quick O(N) pre-count: walk 8-byte headers to determine capacity.
+    let mut count = 0usize;
+    let mut scan = 0usize;
+    while scan + 8 <= data.len() {
+        let sz = u32::from_le_bytes(data[scan + 4..scan + 8].try_into().unwrap()) as usize;
+        scan += 8 + sz;
+        count += 1;
+    }
+
     let mut pos = 0usize;
-    let mut events = Vec::new();
+    let mut events = Vec::with_capacity(count);
 
     while pos + 8 <= data.len() {
         // Read the 8-byte header: event_type (u32 LE) + data_size (u32 LE).

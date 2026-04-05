@@ -41,8 +41,18 @@ pub struct TcgPcrEvent {
 pub struct DigestValue {
     /// The hash algorithm used to produce this digest.
     pub hash_alg: HashAlgorithmId,
-    /// The digest bytes, hex-encoded.
-    pub digest: String,
+    /// The raw digest bytes; serializes as a hex string.
+    #[serde(serialize_with = "hex_serialize", deserialize_with = "hex_deserialize")]
+    pub digest: Vec<u8>,
+}
+
+fn hex_serialize<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&to_hex(bytes))
+}
+
+fn hex_deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    let s = String::deserialize(d)?;
+    Ok(crate::parser::hex_decode(&s))
 }
 
 impl DigestValue {
@@ -55,13 +65,18 @@ impl DigestValue {
     ///
     /// let digest = DigestValue::new(HashAlgorithmId::Sha256, vec![0u8; 32]);
     /// assert_eq!(digest.hash_alg, HashAlgorithmId::Sha256);
-    /// assert_eq!(digest.digest.len(), 64); // 32 bytes → 64 hex chars
+    /// assert_eq!(digest.digest.len(), 32); // raw bytes
     /// ```
     pub fn new(hash_alg: HashAlgorithmId, bytes: Vec<u8>) -> Self {
         Self {
             hash_alg,
-            digest: to_hex(&bytes),
+            digest: bytes,
         }
+    }
+
+    /// Returns the digest as a hex-encoded string.
+    pub fn digest_hex(&self) -> String {
+        to_hex(&self.digest)
     }
 }
 
@@ -70,14 +85,6 @@ impl DigestValue {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Typed event-data payload.
-///
-/// Instead of serializing every parsed struct into a `serde_json::Value`
-/// intermediary (which allocates an `IndexMap` + `String` key for every
-/// field), we store the typed struct directly.  Serialization goes straight
-/// from the struct to JSON bytes via `#[serde(untagged)]`.
-///
-/// This eliminates ~40 % of parse-time overhead that was spent building the
-/// `Value` tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum EventData {
