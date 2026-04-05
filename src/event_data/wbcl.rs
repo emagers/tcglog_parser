@@ -231,6 +231,12 @@ pub const SIPAEVENT_SBCP_INFO: u32 = SIPAEVENTTYPE_OSPARAMETER | 0x0029;
 /// Hypervisor Boot DMA protection is enabled (`bool`).
 pub const SIPAEVENT_HYPERVISOR_BOOT_DMA_PROTECTION: u32 = SIPAEVENTTYPE_OSPARAMETER | 0x0030;
 
+/// Code integrity (WDAC/AppLocker) policy signer information (Windows 11+).
+pub const SIPAEVENT_SI_POLICY_SIGNER: u32 = SIPAEVENTTYPE_OSPARAMETER | 0x0031;
+
+/// Code integrity policy allowed-update signer information (Windows 11+).
+pub const SIPAEVENT_SI_POLICY_UPDATE_SIGNER: u32 = SIPAEVENTTYPE_OSPARAMETER | 0x0032;
+
 // --- Authority events ---
 
 /// The loaded image had no authority / was not signed.
@@ -273,6 +279,23 @@ pub const SIPAEVENT_IMAGEVALIDATED: u32 = SIPAEVENTTYPE_LOADEDMODULE | 0x000A;
 
 /// Security version number (SVN) of the loaded module (`u64`).
 pub const SIPAEVENT_MODULE_SVN: u32 = SIPAEVENTTYPE_LOADEDMODULE | 0x000B;
+
+/// Pluton security processor measurement (Windows 10 NI+, raw bytes).
+pub const SIPAEVENT_MODULE_PLUTON: u32 = SIPAEVENTTYPE_LOADEDMODULE | 0x000C;
+
+/// Module internal / original filename (UTF-16LE string).
+///
+/// Not present in the public `wbcl.h` SDK header; name and purpose are
+/// inferred from observed payloads (e.g. `"bootmgr.exe.mui"`, `"hiberrsm.exe"`).
+/// Corresponds to the PE version-resource *OriginalFilename* / *InternalName*.
+pub const SIPAEVENT_MODULE_ORIGINAL_FILENAME: u32 = SIPAEVENTTYPE_LOADEDMODULE | 0x000D;
+
+/// Module build timestamp or version info (`u64`).
+///
+/// Not present in the public `wbcl.h` SDK header; name and purpose are
+/// inferred from observed 8-byte payloads whose low 4 bytes resemble a PE
+/// `TimeDateStamp` and whose high bytes encode the OS major version.
+pub const SIPAEVENT_MODULE_TIMESTAMP: u32 = SIPAEVENTTYPE_LOADEDMODULE | 0x000E;
 
 // --- Trust-point events (non-measured) ---
 
@@ -528,6 +551,75 @@ impl DriverLoadPolicyData {
     }
 }
 
+// ── Structured payload types ─────────────────────────────────────────────────
+
+/// Decoded System Integrity (CI/WDAC) policy measurement from a
+/// [`SIPAEVENT_SI_POLICY`] event.
+///
+/// Corresponds to `SIPAEVENT_SI_POLICY_PAYLOAD` in the Windows SDK `wbcl.h`.
+/// The `hash_alg_id` field carries a `TPM_ALG_ID` value (e.g. `0x000B` =
+/// `TPM_ALG_SHA256`). The policy name is the string from Windows Boot
+/// Configuration (e.g. `"{Policy GUID}"` or a descriptive name).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiPolicyPayload {
+    /// Policy version number from the WBCL payload.
+    pub policy_version: u64,
+    /// Human-readable policy name decoded from UTF-16LE (includes WDAC/AppLocker
+    /// policy names such as `"{SiPolicy.p7b}"`).
+    pub policy_name: String,
+    /// TPM algorithm ID (`TPM_ALG_ID`) used to produce the digest.
+    pub hash_alg_id: u16,
+    /// Hex-encoded hash digest of the policy blob.
+    pub digest: String,
+}
+
+/// Decoded revocation-list hash from a [`SIPAEVENT_BOOT_REVOCATION_LIST`] or
+/// [`SIPAEVENT_OS_REVOCATION_LIST`] event.
+///
+/// Corresponds to `SIPAEVENT_REVOCATION_LIST_PAYLOAD` in `wbcl.h`.
+/// `creation_time` is a Windows FILETIME (100-nanosecond intervals since
+/// 1601-01-01 UTC).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationListPayload {
+    /// Windows FILETIME of the revocation list's creation.
+    pub creation_time: i64,
+    /// TPM algorithm ID used for the digest.
+    pub hash_alg_id: u16,
+    /// Hex-encoded digest of the revocation list.
+    pub digest: String,
+}
+
+/// Decoded Secure Boot Custom Policy (SBCP) information from a
+/// [`SIPAEVENT_SBCP_INFO`] event.
+///
+/// Corresponds to `SIPAEVENT_SBCP_INFO_PAYLOAD_V1` in `wbcl.h`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SbcpInfoPayload {
+    /// Structure version (1 for `SIPAEVENT_SBCP_INFO_PAYLOAD_V1`).
+    pub payload_version: u32,
+    /// TPM algorithm ID used for the digest.
+    pub hash_alg_id: u16,
+    /// Digest length in bytes.
+    pub digest_length: u16,
+    /// `OptionFlags` from the SBCP descriptor.
+    pub options: u32,
+    /// Number of signers in the SBCP.
+    pub signers_count: u32,
+    /// Hex-encoded digest of the SBCP.
+    pub digest: String,
+}
+
+/// Decoded KSR measurement signature from a [`SIPAEVENT_KSR_SIGNATURE`] event.
+///
+/// Corresponds to `SIPAEVENT_KSR_SIGNATURE_PAYLOAD` in `wbcl.h`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KsrSignaturePayload {
+    /// Signature algorithm identifier.
+    pub sign_alg_id: u32,
+    /// Hex-encoded signature bytes.
+    pub signature: String,
+}
+
 // ── SipaEventType ─────────────────────────────────────────────────────────────
 
 /// A SIPA event-type identifier, serialised as its human-readable name string.
@@ -654,6 +746,8 @@ fn sipa_value_from_name(name: &str) -> Option<u32> {
         "LsaIsoConfig"                        => Some(SIPAEVENT_LSAISO_CONFIG),
         "SbcpInfo"                            => Some(SIPAEVENT_SBCP_INFO),
         "HypervisorBootDmaProtection"         => Some(SIPAEVENT_HYPERVISOR_BOOT_DMA_PROTECTION),
+        "SiPolicySigner"                      => Some(SIPAEVENT_SI_POLICY_SIGNER),
+        "SiPolicyUpdateSigner"                => Some(SIPAEVENT_SI_POLICY_UPDATE_SIGNER),
         "NoAuthority"                         => Some(SIPAEVENT_NOAUTHORITY),
         "AuthorityPubKey"                     => Some(SIPAEVENT_AUTHORITYPUBKEY),
         "FilePath"                            => Some(SIPAEVENT_FILEPATH),
@@ -667,6 +761,9 @@ fn sipa_value_from_name(name: &str) -> Option<u32> {
         "AuthoritySha1Thumbprint"             => Some(SIPAEVENT_AUTHORITYSHA1THUMBPRINT),
         "ImageValidated"                      => Some(SIPAEVENT_IMAGEVALIDATED),
         "ModuleSvn"                           => Some(SIPAEVENT_MODULE_SVN),
+        "ModulePluton"                        => Some(SIPAEVENT_MODULE_PLUTON),
+        "ModuleOriginalFilename"              => Some(SIPAEVENT_MODULE_ORIGINAL_FILENAME),
+        "ModuleTimestamp"                     => Some(SIPAEVENT_MODULE_TIMESTAMP),
         "Quote"                               => Some(SIPAEVENT_QUOTE),
         "QuoteSignature"                      => Some(SIPAEVENT_QUOTESIGNATURE),
         "AikId"                               => Some(SIPAEVENT_AIKID),
@@ -708,6 +805,10 @@ fn sipa_value_from_name(name: &str) -> Option<u32> {
 /// | `TransferControl` | [`SIPAEVENT_TRANSFER_CONTROL`] |
 /// | `HashAlgorithm` | [`SIPAEVENT_HASHALGORITHMID`] |
 /// | `DriverLoadPolicy` | [`SIPAEVENT_DRIVER_LOAD_POLICY`] |
+/// | `SiPolicy` | [`SIPAEVENT_SI_POLICY`] |
+/// | `RevocationList` | [`SIPAEVENT_BOOT_REVOCATION_LIST`], [`SIPAEVENT_OS_REVOCATION_LIST`] |
+/// | `SbcpInfo` | [`SIPAEVENT_SBCP_INFO`] |
+/// | `KsrSignature` | [`SIPAEVENT_KSR_SIGNATURE`] |
 /// | `Text` | UTF-16LE string values (FilePath, SystemRoot, …) |
 /// | `Bytes` | Raw binary data (hashes, signatures, keys) |
 /// | `Empty` | Events with zero-length data |
@@ -728,6 +829,14 @@ pub enum SipaEventData {
     HashAlgorithm(HashAlgorithmData),
     /// Driver load policy.
     DriverLoadPolicy(DriverLoadPolicyData),
+    /// System Integrity (CI/WDAC) policy measurement.
+    SiPolicy(SiPolicyPayload),
+    /// Boot or OS revocation-list hash.
+    RevocationList(RevocationListPayload),
+    /// Secure Boot Custom Policy information.
+    SbcpInfo(SbcpInfoPayload),
+    /// KSR measurement signature.
+    KsrSignature(KsrSignaturePayload),
     /// 64-bit numeric value.
     U64(u64),
     /// 32-bit numeric value.
@@ -753,21 +862,19 @@ pub struct SipaBytes {
 ///
 /// These appear as elements inside the [`WbclEventData`] of an
 /// `EV_EVENT_TAG` TCG log entry.  Each sub-event carries a typed event
-/// identifier that serialises as its human-readable name string, a
-/// non-measured flag, and a decoded payload.
+/// identifier that serialises as its human-readable name string, and a
+/// decoded payload.
 ///
-/// Use [`SipaEventType::is_aggregation`] to test whether this event is a
-/// container, and [`SipaEventType::is_non_measured`] as an alternative to
-/// the `non_measured` field.
+/// Whether the event was measured into a PCR can be tested with
+/// [`SipaEventType::is_non_measured`] on the `event_type` field.
+/// Whether the event is an aggregation container can be tested with
+/// [`SipaEventType::is_aggregation`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SipaEvent {
     /// The SIPA event type.  Serialises to/from its human-readable name
     /// (e.g. `"BootDebugging"`, `"TrustBoundary"`).  Unknown values
     /// round-trip as `"Unknown(0xXXXXXXXX)"`.
     pub event_type: SipaEventType,
-    /// True if this event is informational only — it was **not** extended
-    /// into a PCR (`SIPAEVENTTYPE_NONMEASURED` bit is set).
-    pub non_measured: bool,
     /// Decoded event payload.
     pub data: SipaEventData,
 }
@@ -863,7 +970,6 @@ fn parse_sipa_events(data: &[u8]) -> Result<Vec<SipaEvent>, ParseError> {
 /// Decode a single SIPA sub-event given its raw type and payload bytes.
 fn decode_sipa_event(event_type: u32, data: &[u8]) -> Result<SipaEvent, ParseError> {
     let et = SipaEventType::from_value(event_type);
-    let non_measured = et.is_non_measured();
 
     let sipa_data = if et.is_aggregation() {
         // Recursively decode nested events.
@@ -874,7 +980,6 @@ fn decode_sipa_event(event_type: u32, data: &[u8]) -> Result<SipaEvent, ParseErr
 
     Ok(SipaEvent {
         event_type: et,
-        non_measured,
         data: sipa_data,
     })
 }
@@ -916,10 +1021,17 @@ fn decode_payload(event_type: u32, data: &[u8]) -> SipaEventData {
         | SIPAEVENT_VBS_MANDATORY_ENFORCEMENT
         | SIPAEVENT_VBS_MICROSOFT_BOOT_CHAIN_REQUIRED
         | SIPAEVENT_VBS_VSM_NOSECRETS_ENFORCED
-        | SIPAEVENT_MORBIT_NOT_CANCELABLE
         if data.len() == 1 =>
         {
             SipaEventData::Bool(data[0] != 0)
+        }
+
+        // ── Boolean events with variable-size payload ─────────────────────
+        // SIPAEVENT_MORBIT_NOT_CANCELABLE is documented as INFORMATION-category
+        // but Windows emits a 4-byte DWORD (0x00000001) rather than a 1-byte
+        // BOOLEAN, so we handle it size-agnostically.
+        SIPAEVENT_MORBIT_NOT_CANCELABLE => {
+            SipaEventData::Bool(data.iter().any(|&b| b != 0))
         }
 
         // ── 8-byte U64 events ─────────────────────────────────────────────
@@ -987,10 +1099,116 @@ fn decode_payload(event_type: u32, data: &[u8]) -> SipaEventData {
         | SIPAEVENT_AUTHORITYPUBLISHER
         | SIPAEVENT_AUTHORITYISSUER
         | SIPAEVENT_HYPERVISOR_PATH
-        | SIPAEVENT_ELAM_KEYNAME =>
+        | SIPAEVENT_ELAM_KEYNAME
+        | SIPAEVENT_MODULE_ORIGINAL_FILENAME =>
         {
             let text = decode_utf16le(data);
             SipaEventData::Text(text)
+        }
+
+        // ── SI policy measurement ─────────────────────────────────────────
+        // SIPAEVENT_SI_POLICY_PAYLOAD layout (wbcl.h):
+        //   u64  PolicyVersion        [0..8]
+        //   u16  PolicyNameLength     [8..10]  bytes, incl. UTF-16LE null terminator
+        //   u16  HashAlgID            [10..12] TPM_ALG_ID
+        //   u32  DigestLength         [12..16] bytes
+        //   u8   PolicyName[PolicyNameLength]  (UTF-16LE)
+        //   u8   Digest[DigestLength]
+        SIPAEVENT_SI_POLICY => {
+            if data.len() >= 16 {
+                let policy_version = u64::from_le_bytes(data[..8].try_into().unwrap());
+                let name_len       = u16::from_le_bytes(data[8..10].try_into().unwrap()) as usize;
+                let hash_alg_id    = u16::from_le_bytes(data[10..12].try_into().unwrap());
+                let digest_len     = u32::from_le_bytes(data[12..16].try_into().unwrap()) as usize;
+                let var_end = 16 + name_len + digest_len;
+                if data.len() >= var_end {
+                    let policy_name = decode_utf16le(&data[16..16 + name_len]);
+                    let digest      = to_hex(&data[16 + name_len..var_end]);
+                    return SipaEventData::SiPolicy(SiPolicyPayload {
+                        policy_version,
+                        policy_name,
+                        hash_alg_id,
+                        digest,
+                    });
+                }
+            }
+            SipaEventData::Bytes(SipaBytes { raw: to_hex(data) })
+        }
+
+        // ── Revocation-list hash ──────────────────────────────────────────
+        // SIPAEVENT_REVOCATION_LIST_PAYLOAD layout (wbcl.h):
+        //   i64  CreationTime         [0..8]   Windows FILETIME
+        //   u32  DigestLength         [8..12]  bytes
+        //   u16  HashAlgID            [12..14] TPM_ALG_ID
+        //   u8   Digest[DigestLength]
+        SIPAEVENT_BOOT_REVOCATION_LIST | SIPAEVENT_OS_REVOCATION_LIST => {
+            if data.len() >= 14 {
+                let creation_time = i64::from_le_bytes(data[..8].try_into().unwrap());
+                let digest_len    = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+                let hash_alg_id   = u16::from_le_bytes(data[12..14].try_into().unwrap());
+                if data.len() >= 14 + digest_len {
+                    let digest = to_hex(&data[14..14 + digest_len]);
+                    return SipaEventData::RevocationList(RevocationListPayload {
+                        creation_time,
+                        hash_alg_id,
+                        digest,
+                    });
+                }
+            }
+            SipaEventData::Bytes(SipaBytes { raw: to_hex(data) })
+        }
+
+        // ── Secure Boot Custom Policy information ─────────────────────────
+        // SIPAEVENT_SBCP_INFO_PAYLOAD_V1 layout (wbcl.h):
+        //   u32  PayloadVersion    [0..4]
+        //   u32  VarDataOffset     [4..8]   offset from struct start to VarData
+        //   u16  HashAlgID         [8..10]  TPM_ALG_ID
+        //   u16  DigestLength      [10..12] bytes
+        //   u32  Options           [12..16]
+        //   u32  SignersCount      [16..20]
+        //   u8   VarData[DigestLength] at VarDataOffset
+        SIPAEVENT_SBCP_INFO => {
+            if data.len() >= 20 {
+                let payload_version = u32::from_le_bytes(data[..4].try_into().unwrap());
+                let var_data_offset = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+                let hash_alg_id     = u16::from_le_bytes(data[8..10].try_into().unwrap());
+                let digest_length   = u16::from_le_bytes(data[10..12].try_into().unwrap());
+                let options         = u32::from_le_bytes(data[12..16].try_into().unwrap());
+                let signers_count   = u32::from_le_bytes(data[16..20].try_into().unwrap());
+                let dig_end = var_data_offset + digest_length as usize;
+                if data.len() >= dig_end {
+                    let digest = to_hex(&data[var_data_offset..dig_end]);
+                    return SipaEventData::SbcpInfo(SbcpInfoPayload {
+                        payload_version,
+                        hash_alg_id,
+                        digest_length,
+                        options,
+                        signers_count,
+                        digest,
+                    });
+                }
+            }
+            SipaEventData::Bytes(SipaBytes { raw: to_hex(data) })
+        }
+
+        // ── KSR measurement signature ─────────────────────────────────────
+        // SIPAEVENT_KSR_SIGNATURE_PAYLOAD layout (wbcl.h):
+        //   u32  SignAlgID          [0..4]
+        //   u32  SignatureLength    [4..8]  bytes
+        //   u8   Signature[SignatureLength]
+        SIPAEVENT_KSR_SIGNATURE => {
+            if data.len() >= 8 {
+                let sign_alg_id      = u32::from_le_bytes(data[..4].try_into().unwrap());
+                let signature_length = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+                if data.len() >= 8 + signature_length {
+                    let signature = to_hex(&data[8..8 + signature_length]);
+                    return SipaEventData::KsrSignature(KsrSignaturePayload {
+                        sign_alg_id,
+                        signature,
+                    });
+                }
+            }
+            SipaEventData::Bytes(SipaBytes { raw: to_hex(data) })
         }
 
         // ── Everything else: raw bytes ────────────────────────────────────
@@ -1069,6 +1287,8 @@ pub fn sipa_event_name(event_type: u32) -> &'static str {
         SIPAEVENT_LSAISO_CONFIG                   => "LsaIsoConfig",
         SIPAEVENT_SBCP_INFO                       => "SbcpInfo",
         SIPAEVENT_HYPERVISOR_BOOT_DMA_PROTECTION  => "HypervisorBootDmaProtection",
+        SIPAEVENT_SI_POLICY_SIGNER                => "SiPolicySigner",
+        SIPAEVENT_SI_POLICY_UPDATE_SIGNER         => "SiPolicyUpdateSigner",
         SIPAEVENT_NOAUTHORITY                     => "NoAuthority",
         SIPAEVENT_AUTHORITYPUBKEY                 => "AuthorityPubKey",
         SIPAEVENT_FILEPATH                        => "FilePath",
@@ -1082,6 +1302,9 @@ pub fn sipa_event_name(event_type: u32) -> &'static str {
         SIPAEVENT_AUTHORITYSHA1THUMBPRINT         => "AuthoritySha1Thumbprint",
         SIPAEVENT_IMAGEVALIDATED                  => "ImageValidated",
         SIPAEVENT_MODULE_SVN                      => "ModuleSvn",
+        SIPAEVENT_MODULE_PLUTON                   => "ModulePluton",
+        SIPAEVENT_MODULE_ORIGINAL_FILENAME        => "ModuleOriginalFilename",
+        SIPAEVENT_MODULE_TIMESTAMP                => "ModuleTimestamp",
         SIPAEVENT_QUOTE                           => "Quote",
         SIPAEVENT_QUOTESIGNATURE                  => "QuoteSignature",
         SIPAEVENT_AIKID                           => "AikId",
@@ -1133,7 +1356,7 @@ mod tests {
         assert_eq!(ev.events.len(), 1);
         assert_eq!(ev.events[0].event_type, SIPAEVENT_BOOTDEBUGGING);
         assert_eq!(ev.events[0].event_type.name(), "BootDebugging");
-        assert!(!ev.events[0].non_measured);
+        assert!(!ev.events[0].event_type.is_non_measured());
         assert!(!ev.events[0].event_type.is_aggregation());
         assert_eq!(ev.events[0].data, SipaEventData::Bool(true));
     }
@@ -1293,7 +1516,7 @@ mod tests {
         let tb = &ev.events[0];
         assert_eq!(tb.event_type, SIPAEVENT_TRUSTBOUNDARY);
         assert!(tb.event_type.is_aggregation());
-        assert!(!tb.non_measured);
+        assert!(!tb.event_type.is_non_measured());
 
         match &tb.data {
             SipaEventData::Container(children) => {
@@ -1312,7 +1535,7 @@ mod tests {
         let ev = WbclEventData::parse(&outer).unwrap();
 
         let tp = &ev.events[0];
-        assert!(tp.non_measured);
+        assert!(tp.event_type.is_non_measured());
         assert!(tp.event_type.is_aggregation());
         assert_eq!(tp.event_type.name(), "TrustPointAggregation");
     }

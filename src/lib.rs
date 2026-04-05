@@ -112,8 +112,10 @@ pub use event_data::{
     WbclEventData,
 };
 pub use event_data::wbcl::{
-    BitlockerUnlockData, DriverLoadPolicyData, HashAlgorithmData, OsDeviceData,
+    BitlockerUnlockData, DriverLoadPolicyData, HashAlgorithmData, KsrSignaturePayload,
+    OsDeviceData, RevocationListPayload, SbcpInfoPayload, SiPolicyPayload,
     SipaBytes, SipaEvent, SipaEventData, SipaEventType, TransferControlData,
+    SIPAEVENT_SI_POLICY_SIGNER, SIPAEVENT_SI_POLICY_UPDATE_SIGNER,
     sipa_event_name,
     SIPAEVENTTYPE_NONMEASURED, SIPAEVENTTYPE_AGGREGATION,
     SIPAEVENT_TRUSTBOUNDARY, SIPAEVENT_ELAM_AGGREGATION, SIPAEVENT_LOADEDMODULE_AGGREGATION,
@@ -129,6 +131,7 @@ pub use event_data::wbcl::{
     SIPAEVENT_IMAGEBASE, SIPAEVENT_AUTHORITYPUBLISHER, SIPAEVENT_AUTHORITYSHA1THUMBPRINT,
     SIPAEVENT_IMAGEVALIDATED, SIPAEVENT_QUOTE, SIPAEVENT_QUOTESIGNATURE,
     SIPAEVENT_AIKID, SIPAEVENT_AIKPUBDIGEST, SIPAEVENT_ELAM_KEYNAME,
+    SIPAEVENT_MODULE_PLUTON, SIPAEVENT_MODULE_ORIGINAL_FILENAME, SIPAEVENT_MODULE_TIMESTAMP,
     SIPAEVENT_VBS_VSM_REQUIRED, SIPAEVENT_VBS_SECUREBOOT_REQUIRED,
 };
 pub use parser::{EventDataParser, TcgLogParser};
