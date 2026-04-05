@@ -620,6 +620,50 @@ pub struct KsrSignaturePayload {
     pub signature: String,
 }
 
+/// A single certificate entry within a [`SiPolicySignerPayload`].
+///
+/// Corresponds to `SIPAEVENT_SI_POLICY_CERTIFICATE_PAYLOAD` in `wbcl.h`.
+/// This is not a full X.509 certificate but a condensed signer record
+/// extracted from the SI policy signature chain: the CN of the leaf
+/// certificate, the CN of its issuer, and a CAPI hash digest of the
+/// certificate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiPolicyCertPayload {
+    /// Common name of the certificate subject, decoded from UTF-16LE.
+    /// Example: `"Microsoft Windows"`.
+    pub publisher_common_name: String,
+    /// Common name of the certificate issuer, decoded from UTF-16LE.
+    /// Example: `"Microsoft Windows Production PCA 2011"`.
+    pub issuer_common_name: String,
+    /// CAPI hash algorithm identifier used for `digest`
+    /// (e.g. `0x0000800C` = `CALG_SHA_256`).
+    pub hash_alg_id: u32,
+    /// Hex-encoded hash digest of the certificate.
+    pub digest: String,
+}
+
+/// Decoded SI policy signer chain from a [`SIPAEVENT_SI_POLICY_SIGNER`] or
+/// [`SIPAEVENT_SI_POLICY_UPDATE_SIGNER`] event.
+///
+/// Corresponds to `SIPAEVENT_SI_POLICY_SIGNER_PAYLOAD` in `wbcl.h`.
+/// The `certificates` list contains the chain entries in order (leaf first,
+/// root last), each providing the publisher CN, issuer CN, and a hash digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiPolicySignerPayload {
+    /// Identifies the root of trust.  Known values mirror the
+    /// `MINCRYPT_KNOWN_ROOT_*` constants (e.g. `6` = Microsoft Production
+    /// Root 2010).
+    pub root_id: u32,
+    /// Policy name decoded from UTF-16LE (matches the policy filename, e.g.
+    /// `"{784c4414-...}.CIP"` or `"DriverSiPolicy.p7b"`).
+    pub policy_name: String,
+    /// Raw EKU bytes, one hex string per EKU entry (split by count, size
+    /// determined by `EKUsLength / EKUsCount`).
+    pub ekus: Vec<String>,
+    /// Certificate chain entries from the SI policy signature, leaf first.
+    pub certificates: Vec<SiPolicyCertPayload>,
+}
+
 // ── SipaEventType ─────────────────────────────────────────────────────────────
 
 /// A SIPA event-type identifier, serialised as its human-readable name string.
@@ -809,6 +853,7 @@ fn sipa_value_from_name(name: &str) -> Option<u32> {
 /// | `RevocationList` | [`SIPAEVENT_BOOT_REVOCATION_LIST`], [`SIPAEVENT_OS_REVOCATION_LIST`] |
 /// | `SbcpInfo` | [`SIPAEVENT_SBCP_INFO`] |
 /// | `KsrSignature` | [`SIPAEVENT_KSR_SIGNATURE`] |
+/// | `SiPolicySigner` | [`SIPAEVENT_SI_POLICY_SIGNER`], [`SIPAEVENT_SI_POLICY_UPDATE_SIGNER`] |
 /// | `Text` | UTF-16LE string values (FilePath, SystemRoot, …) |
 /// | `Bytes` | Raw binary data (hashes, signatures, keys) |
 /// | `Empty` | Events with zero-length data |
@@ -837,6 +882,8 @@ pub enum SipaEventData {
     SbcpInfo(SbcpInfoPayload),
     /// KSR measurement signature.
     KsrSignature(KsrSignaturePayload),
+    /// SI policy signer chain (leaf cert CN/issuer/digest for each cert in chain).
+    SiPolicySigner(SiPolicySignerPayload),
     /// 64-bit numeric value.
     U64(u64),
     /// 32-bit numeric value.
@@ -1211,6 +1258,13 @@ fn decode_payload(event_type: u32, data: &[u8]) -> SipaEventData {
             SipaEventData::Bytes(SipaBytes { raw: to_hex(data) })
         }
 
+        // ── SI policy signer chain ────────────────────────────────────────
+        // SIPAEVENT_SI_POLICY_SIGNER_PAYLOAD layout (wbcl.h): see
+        // parse_si_policy_signer() for the full field description.
+        SIPAEVENT_SI_POLICY_SIGNER | SIPAEVENT_SI_POLICY_UPDATE_SIGNER => {
+            parse_si_policy_signer(data)
+        }
+
         // ── Everything else: raw bytes ────────────────────────────────────
         _ => SipaEventData::Bytes(SipaBytes { raw: to_hex(data) }),
     }
@@ -1225,6 +1279,114 @@ fn decode_utf16le(data: &[u8]) -> String {
     String::from_utf16_lossy(&u16s)
         .trim_matches('\0')
         .to_string()
+}
+
+// ── parse_si_policy_signer ────────────────────────────────────────────────────
+
+/// Parse a `SIPAEVENT_SI_POLICY_SIGNER_PAYLOAD` structure.
+///
+/// Layout (`wbcl.h`):
+/// ```text
+/// u32  RootID
+/// u32  CertificatesLength
+/// u16  CertificatesCount
+/// u16  PolicyNameLength      (bytes, UTF-16LE, no null terminator)
+/// u16  EKUsLength            (bytes)
+/// u16  EKUsCount
+/// u8   PolicyName[PolicyNameLength]
+/// u8   EKUs[EKUsLength]
+/// u8   Certificates[CertificatesLength]  -- SIPAEVENT_SI_POLICY_CERTIFICATE_PAYLOAD[]
+/// ```
+///
+/// Each `SIPAEVENT_SI_POLICY_CERTIFICATE_PAYLOAD`:
+/// ```text
+/// u16  PublisherCommonNameLength  (bytes, UTF-16LE)
+/// u16  IssuerCommonNameLength     (bytes, UTF-16LE)
+/// u32  HashAlgID                  (CAPI ALG_ID)
+/// u16  DigestLength               (bytes)
+/// u8   PublisherCN[PublisherCommonNameLength]
+/// u8   IssuerCN[IssuerCommonNameLength]
+/// u8   Digest[DigestLength]
+/// ```
+fn parse_si_policy_signer(data: &[u8]) -> SipaEventData {
+    if data.len() < 16 {
+        return SipaEventData::Bytes(SipaBytes { raw: to_hex(data) });
+    }
+
+    let root_id             = u32::from_le_bytes(data[0..4].try_into().unwrap());
+    let certificates_length = u32::from_le_bytes(data[4..8].try_into().unwrap()) as usize;
+    let certificates_count  = u16::from_le_bytes(data[8..10].try_into().unwrap()) as usize;
+    let policy_name_length  = u16::from_le_bytes(data[10..12].try_into().unwrap()) as usize;
+    let ekus_length         = u16::from_le_bytes(data[12..14].try_into().unwrap()) as usize;
+    let ekus_count          = u16::from_le_bytes(data[14..16].try_into().unwrap()) as usize;
+
+    let policy_name_start = 16;
+    let ekus_start   = policy_name_start + policy_name_length;
+    let certs_start  = ekus_start + ekus_length;
+    let certs_end    = certs_start + certificates_length;
+
+    if data.len() < certs_end {
+        return SipaEventData::Bytes(SipaBytes { raw: to_hex(data) });
+    }
+
+    let policy_name = decode_utf16le(&data[policy_name_start..ekus_start]);
+
+    // EKUs: split equally by count, store as raw hex per slot.
+    let eku_data = &data[ekus_start..certs_start];
+    let ekus: Vec<String> = if ekus_count > 0 && ekus_length % ekus_count == 0 {
+        let slot = ekus_length / ekus_count;
+        eku_data.chunks(slot).map(to_hex).collect()
+    } else {
+        if !eku_data.is_empty() {
+            vec![to_hex(eku_data)]
+        } else {
+            Vec::new()
+        }
+    };
+
+    // Certificates: parse SIPAEVENT_SI_POLICY_CERTIFICATE_PAYLOAD[] entries.
+    let cert_blob = &data[certs_start..certs_end];
+    let mut certificates = Vec::with_capacity(certificates_count);
+    let mut pos = 0;
+
+    for _ in 0..certificates_count {
+        // Fixed header: 2+2+4+2 = 10 bytes
+        if pos + 10 > cert_blob.len() {
+            break;
+        }
+        let pub_cn_len  = u16::from_le_bytes(cert_blob[pos..pos + 2].try_into().unwrap()) as usize;
+        let iss_cn_len  = u16::from_le_bytes(cert_blob[pos + 2..pos + 4].try_into().unwrap()) as usize;
+        let hash_alg_id = u32::from_le_bytes(cert_blob[pos + 4..pos + 8].try_into().unwrap());
+        let digest_len  = u16::from_le_bytes(cert_blob[pos + 8..pos + 10].try_into().unwrap()) as usize;
+        pos += 10;
+
+        let var_len = pub_cn_len + iss_cn_len + digest_len;
+        if pos + var_len > cert_blob.len() {
+            break;
+        }
+
+        let publisher_common_name =
+            decode_utf16le(&cert_blob[pos..pos + pub_cn_len]);
+        let issuer_common_name =
+            decode_utf16le(&cert_blob[pos + pub_cn_len..pos + pub_cn_len + iss_cn_len]);
+        let digest =
+            to_hex(&cert_blob[pos + pub_cn_len + iss_cn_len..pos + var_len]);
+        pos += var_len;
+
+        certificates.push(SiPolicyCertPayload {
+            publisher_common_name,
+            issuer_common_name,
+            hash_alg_id,
+            digest,
+        });
+    }
+
+    SipaEventData::SiPolicySigner(SiPolicySignerPayload {
+        root_id,
+        policy_name,
+        ekus,
+        certificates,
+    })
 }
 
 /// Return the human-readable name for a SIPA event type value.

@@ -11,6 +11,8 @@ pub use wbcl::WbclEventData;
 use crate::error::{Cursor, ParseError};
 use crate::types::{Guid, to_hex};
 use serde::{Deserialize, Serialize};
+use sha1::Digest as Sha1Digest;
+use x509_parser::prelude::*;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // SpecID event (TCG 2.0 log header)
@@ -140,6 +142,225 @@ impl SpecIdEvent {
 // UEFI variable data  (EV_EFI_VARIABLE_*)
 // ──────────────────────────────────────────────────────────────────────────────
 
+// ── Certificate info (decoded from DER X.509) ─────────────────────────────────
+
+/// Decoded X.509 certificate information extracted from a DER-encoded cert.
+///
+/// Attached as an optional field to [`UefiVariableData`] when the
+/// `variable_data` bytes (after the 16-byte `SignatureOwner` GUID prefix)
+/// contain a valid DER-encoded X.509 certificate.  This is the case for
+/// `EV_EFI_VARIABLE_AUTHORITY` events (Secure Boot `db`/`KEK` measurements).
+///
+/// For all other UEFI variable events the field is `None`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CertificateInfo {
+    /// Subject Distinguished Name in RFC 4514 string form.
+    /// Example: `"CN=Microsoft Windows, O=Microsoft Corporation, C=US"`.
+    pub subject: String,
+    /// Issuer Distinguished Name in RFC 4514 string form.
+    /// Example: `"CN=Microsoft Windows Production PCA 2011, O=Microsoft Corporation, C=US"`.
+    pub issuer: String,
+    /// Hex-encoded certificate serial number (big-endian bytes).
+    pub serial_number: String,
+    /// Validity start as a UTC timestamp string.
+    pub not_before: String,
+    /// Validity end as a UTC timestamp string.
+    pub not_after: String,
+    /// SHA-1 thumbprint (fingerprint) of the raw DER certificate bytes,
+    /// hex-encoded.  Matches the Windows "Thumbprint" field in Certificate
+    /// Manager.
+    pub thumbprint_sha1: String,
+}
+
+/// Try to decode a DER-encoded X.509 certificate into a [`CertificateInfo`].
+///
+/// Returns `None` if `der` is not a valid DER X.509 certificate.
+fn try_decode_x509(der: &[u8]) -> Option<CertificateInfo> {
+    let (_, cert) = X509Certificate::from_der(der).ok()?;
+
+    let subject      = cert.subject().to_string();
+    let issuer       = cert.issuer().to_string();
+    let serial_number = to_hex(cert.raw_serial());
+    let not_before   = cert.validity().not_before.to_string();
+    let not_after    = cert.validity().not_after.to_string();
+
+    // SHA-1 thumbprint = SHA-1 of the raw DER bytes (same as Windows "Thumbprint").
+    let thumbprint_sha1 = to_hex(&sha1::Sha1::digest(der));
+
+    Some(CertificateInfo {
+        subject,
+        issuer,
+        serial_number,
+        not_before,
+        not_after,
+        thumbprint_sha1,
+    })
+}
+
+// ── EFI_SIGNATURE_LIST parsing ────────────────────────────────────────────────
+
+/// `EFI_CERT_X509_GUID` = `{a5c059a1-94e4-4aa7-87b5-ab155c2bf072}` raw bytes.
+const EFI_CERT_X509_GUID_BYTES: [u8; 16] = [
+    0xa1, 0x59, 0xc0, 0xa5, 0xe4, 0x94, 0xa7, 0x4a,
+    0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72,
+];
+/// `EFI_CERT_SHA256_GUID` = `{c1c41626-504c-4092-aca9-41f936934328}` raw bytes.
+const EFI_CERT_SHA256_GUID_BYTES: [u8; 16] = [
+    0x26, 0x16, 0xc4, 0xc1, 0x4c, 0x50, 0x92, 0x40,
+    0xac, 0xa9, 0x41, 0xf9, 0x36, 0x93, 0x43, 0x28,
+];
+/// `EFI_CERT_SHA1_GUID` = `{826ca512-cf10-4ac9-b187-be01496631bd}` raw bytes.
+const EFI_CERT_SHA1_GUID_BYTES: [u8; 16] = [
+    0x12, 0xa5, 0x6c, 0x82, 0x10, 0xcf, 0xc9, 0x4a,
+    0xb1, 0x87, 0xbe, 0x01, 0x49, 0x66, 0x31, 0xbd,
+];
+/// `EFI_CERT_SHA384_GUID` = `{ff3e5307-9fd0-48c9-85f1-8ad56c701e01}` raw bytes.
+const EFI_CERT_SHA384_GUID_BYTES: [u8; 16] = [
+    0x07, 0x53, 0x3e, 0xff, 0xd0, 0x9f, 0xc9, 0x48,
+    0x85, 0xf1, 0x8a, 0xd5, 0x6c, 0x70, 0x1e, 0x01,
+];
+/// `EFI_CERT_SHA512_GUID` = `{093e0fae-a6c4-4f50-9f1b-d41e2b89c19a}` raw bytes.
+const EFI_CERT_SHA512_GUID_BYTES: [u8; 16] = [
+    0xae, 0x0f, 0x3e, 0x09, 0xc4, 0xa6, 0x50, 0x4f,
+    0x9f, 0x1b, 0xd4, 0x1e, 0x2b, 0x89, 0xc1, 0x9a,
+];
+
+/// A single entry within an [`EfiSignatureList`].
+///
+/// Corresponds to `EFI_SIGNATURE_DATA` in the UEFI specification.
+/// The payload is decoded as either an X.509 certificate or a hash, depending
+/// on the `signature_type` of the enclosing list.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EfiSignatureEntry {
+    /// `EFI_SIGNATURE_DATA.SignatureOwner` formatted as
+    /// `{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}`.
+    pub owner: String,
+    /// Decoded X.509 certificate for `EFI_CERT_X509` lists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_info: Option<CertificateInfo>,
+    /// Hex-encoded hash digest for SHA-* lists (dbx, etc.).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+}
+
+/// A parsed `EFI_SIGNATURE_LIST` from a UEFI variable payload
+/// (`PK`, `KEK`, `db`, `dbx`, …).
+///
+/// Each UEFI Secure Boot variable contains one or more signature lists.
+/// A list groups entries of the same type (e.g. X.509 certificates or
+/// SHA-256 revocation hashes) under a common `signature_type` name.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EfiSignatureList {
+    /// Human-readable signature type name derived from the
+    /// `EFI_SIGNATURE_LIST.SignatureType` GUID:
+    ///
+    /// | Name | GUID |
+    /// |---|---|
+    /// | `EFI_CERT_X509` | `{a5c059a1-94e4-4aa7-87b5-ab155c2bf072}` |
+    /// | `EFI_CERT_SHA256` | `{c1c41626-504c-4092-aca9-41f936934328}` |
+    /// | `EFI_CERT_SHA1` | `{826ca512-cf10-4ac9-b187-be01496631bd}` |
+    /// | `EFI_CERT_SHA384` | `{ff3e5307-9fd0-48c9-85f1-8ad56c701e01}` |
+    /// | `EFI_CERT_SHA512` | `{093e0fae-a6c4-4f50-9f1b-d41e2b89c19a}` |
+    pub signature_type: String,
+    /// Individual signature entries (certs or hashes).
+    pub entries: Vec<EfiSignatureEntry>,
+}
+
+/// Try to parse `data` as a concatenated sequence of `EFI_SIGNATURE_LIST`
+/// structures.  Returns `None` if the data does not begin with a recognised
+/// signature-type GUID (so non-signature variable data is left untouched).
+///
+/// `EFI_SIGNATURE_LIST` layout (UEFI spec §32.4.1):
+/// ```text
+/// [0..16]  SignatureType GUID
+/// [16..20] SignatureListSize  (u32 LE)  — total bytes for this list
+/// [20..24] SignatureHeaderSize (u32 LE) — bytes of extra header before entries
+/// [24..28] SignatureSize      (u32 LE)  — bytes per EFI_SIGNATURE_DATA entry
+/// [28 + SignatureHeaderSize .. SignatureListSize]  EFI_SIGNATURE_DATA[]
+/// ```
+/// Each `EFI_SIGNATURE_DATA` entry is `SignatureSize` bytes:
+/// ```text
+/// [0..16]  SignatureOwner GUID
+/// [16..]   SignatureData  (cert DER or hash bytes)
+/// ```
+fn parse_signature_lists(data: &[u8]) -> Option<Vec<EfiSignatureList>> {
+    // Minimum valid structure is a 28-byte list header with a known GUID.
+    if data.len() < 28 {
+        return None;
+    }
+    // Reject data whose first 16 bytes are not a known GUID — this avoids
+    // misidentifying random variable data as a signature list.
+    let first_guid = &data[..16];
+    if first_guid != &EFI_CERT_X509_GUID_BYTES
+        && first_guid != &EFI_CERT_SHA256_GUID_BYTES
+        && first_guid != &EFI_CERT_SHA1_GUID_BYTES
+        && first_guid != &EFI_CERT_SHA384_GUID_BYTES
+        && first_guid != &EFI_CERT_SHA512_GUID_BYTES
+    {
+        return None;
+    }
+
+    let mut lists = Vec::new();
+    let mut pos = 0usize;
+
+    while pos + 28 <= data.len() {
+        let sig_type_bytes = &data[pos..pos + 16];
+        let list_size    = u32::from_le_bytes(data[pos + 16..pos + 20].try_into().unwrap()) as usize;
+        let header_size  = u32::from_le_bytes(data[pos + 20..pos + 24].try_into().unwrap()) as usize;
+        let sig_size     = u32::from_le_bytes(data[pos + 24..pos + 28].try_into().unwrap()) as usize;
+
+        if list_size < 28 || pos + list_size > data.len() {
+            break;
+        }
+
+        let type_name = if sig_type_bytes == &EFI_CERT_X509_GUID_BYTES {
+            "EFI_CERT_X509"
+        } else if sig_type_bytes == &EFI_CERT_SHA256_GUID_BYTES {
+            "EFI_CERT_SHA256"
+        } else if sig_type_bytes == &EFI_CERT_SHA1_GUID_BYTES {
+            "EFI_CERT_SHA1"
+        } else if sig_type_bytes == &EFI_CERT_SHA384_GUID_BYTES {
+            "EFI_CERT_SHA384"
+        } else if sig_type_bytes == &EFI_CERT_SHA512_GUID_BYTES {
+            "EFI_CERT_SHA512"
+        } else {
+            break; // Unknown GUID — stop.
+        };
+        let is_x509 = type_name == "EFI_CERT_X509";
+
+        let entries_start = pos + 28 + header_size;
+        let entries_end   = pos + list_size;
+
+        let mut entries = Vec::new();
+
+        if sig_size >= 17 && entries_start < entries_end {
+            let mut ep = entries_start;
+            while ep + sig_size <= entries_end {
+                let owner_bytes: [u8; 16] = data[ep..ep + 16].try_into().unwrap();
+                let owner   = Guid::from_bytes(owner_bytes).to_string();
+                let payload = &data[ep + 16..ep + sig_size];
+
+                let (certificate_info, hash) = if is_x509 {
+                    (try_decode_x509(payload), None)
+                } else {
+                    (None, Some(to_hex(payload)))
+                };
+
+                entries.push(EfiSignatureEntry { owner, certificate_info, hash });
+                ep += sig_size;
+            }
+        }
+
+        lists.push(EfiSignatureList {
+            signature_type: type_name.to_string(),
+            entries,
+        });
+        pos += list_size;
+    }
+
+    if lists.is_empty() { None } else { Some(lists) }
+}
+
 /// Event data for EFI variable events
 /// (`EV_EFI_VARIABLE_DRIVER_CONFIG`, `EV_EFI_VARIABLE_BOOT`,
 /// `EV_EFI_VARIABLE_AUTHORITY`).
@@ -153,6 +374,18 @@ pub struct UefiVariableData {
     pub unicode_name: String,
     /// Raw variable data, hex-encoded.
     pub variable_data: String,
+    /// Decoded X.509 certificate information, present when `variable_data`
+    /// contains an `EFI_SIGNATURE_DATA` record whose payload is a valid
+    /// DER-encoded X.509 certificate (e.g. `EV_EFI_VARIABLE_AUTHORITY`
+    /// events).  `None` for all other UEFI variable events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub certificate_info: Option<CertificateInfo>,
+    /// Parsed `EFI_SIGNATURE_LIST` contents for Secure Boot database
+    /// variables (`PK`, `KEK`, `db`, `dbx`, …).  Each list entry contains
+    /// either decoded X.509 certificates or revocation hashes.
+    /// `None` when `variable_data` is not a signature-list structure.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_list: Option<Vec<EfiSignatureList>>,
 }
 
 impl UefiVariableData {
@@ -199,10 +432,27 @@ impl UefiVariableData {
         let var_data = c.read_bytes(variable_data_length)?;
         let variable_data = to_hex(var_data);
 
+        // For EV_EFI_VARIABLE_AUTHORITY the variable_data is an
+        // EFI_SIGNATURE_DATA structure: a 16-byte SignatureOwner GUID
+        // followed by a DER-encoded X.509 certificate.  Try to decode it;
+        // if this is any other variable type the parse will fail and we
+        // return None gracefully.
+        let certificate_info = if var_data.len() > 16 {
+            try_decode_x509(&var_data[16..])
+        } else {
+            None
+        };
+
+        // For Secure Boot database variables (PK, KEK, db, dbx) the
+        // variable_data is one or more EFI_SIGNATURE_LIST structures.
+        let signature_list = parse_signature_lists(var_data);
+
         Ok(Self {
             variable_name,
             unicode_name,
             variable_data,
+            certificate_info,
+            signature_list,
         })
     }
 }

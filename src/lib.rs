@@ -107,13 +107,14 @@ pub mod warning;
 pub use error::ParseError;
 pub use event::{DigestValue, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 pub use event_data::{
-    AlgorithmSize, EfiConfigurationTable, SpecIdEvent, StartupLocality, UefiFirmwareBlob,
-    UefiFirmwareBlob2, UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData,
-    WbclEventData,
+    AlgorithmSize, CertificateInfo, EfiConfigurationTable, EfiSignatureEntry, EfiSignatureList,
+    SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2,
+    UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData, WbclEventData,
 };
 pub use event_data::wbcl::{
     BitlockerUnlockData, DriverLoadPolicyData, HashAlgorithmData, KsrSignaturePayload,
-    OsDeviceData, RevocationListPayload, SbcpInfoPayload, SiPolicyPayload,
+    OsDeviceData, RevocationListPayload, SbcpInfoPayload, SiPolicyCertPayload,
+    SiPolicyPayload, SiPolicySignerPayload,
     SipaBytes, SipaEvent, SipaEventData, SipaEventType, TransferControlData,
     SIPAEVENT_SI_POLICY_SIGNER, SIPAEVENT_SI_POLICY_UPDATE_SIGNER,
     sipa_event_name,
