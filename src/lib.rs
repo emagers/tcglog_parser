@@ -105,7 +105,7 @@ pub mod warning;
 // ── Public re-exports ─────────────────────────────────────────────────────────
 
 pub use error::ParseError;
-pub use event::{DigestValue, TcgLog, TcgPcrEvent, TcgPcrEvent2};
+pub use event::{DigestValue, EventData, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 pub use event_data::{
     AlgorithmSize, CertificateInfo, EfiConfigurationTable, EfiSignatureEntry, EfiSignatureList,
     SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2,
@@ -219,15 +219,17 @@ pub mod tests {
     /// # Examples
     ///
     /// ```
-    /// use tcglog_parser::{TcgLogParser, EventType};
+    /// use tcglog_parser::{TcgLogParser, EventType, EventData};
     ///
     /// let raw = tcglog_parser::tests::tcg2_log_with_efi_variable();
     /// let log = TcgLogParser::new().parse(&raw).unwrap();
     ///
     /// assert_eq!(log.events.len(), 1);
     /// assert_eq!(log.events[0].event_type, EventType::EfiVariableDriverConfig);
-    /// let data = &log.events[0].event_data;
-    /// assert_eq!(data["unicode_name"], "SecureBoot");
+    /// match &log.events[0].event_data {
+    ///     EventData::UefiVariable(v) => assert_eq!(v.unicode_name, "SecureBoot"),
+    ///     _ => panic!("expected UefiVariable"),
+    /// }
     /// ```
     pub fn tcg2_log_with_efi_variable() -> Vec<u8> {
         let spec_id_data = spec_id_bytes(&[(0x000B, 32)]);
@@ -264,14 +266,17 @@ pub mod tests {
     /// # Examples
     ///
     /// ```
-    /// use tcglog_parser::{TcgLogParser, EventType};
+    /// use tcglog_parser::{TcgLogParser, EventType, EventData};
     ///
     /// let raw = tcglog_parser::tests::tcg2_log_with_firmware_blob();
     /// let log = TcgLogParser::new().parse(&raw).unwrap();
     ///
     /// assert_eq!(log.events.len(), 1);
     /// assert_eq!(log.events[0].event_type, EventType::EfiFirmwareBlob);
-    /// assert_eq!(log.events[0].event_data["blob_base"], 0xFF000000u64);
+    /// match &log.events[0].event_data {
+    ///     EventData::FirmwareBlob(b) => assert_eq!(b.blob_base, 0xFF000000u64),
+    ///     _ => panic!("expected FirmwareBlob"),
+    /// }
     /// ```
     pub fn tcg2_log_with_firmware_blob() -> Vec<u8> {
         let spec_id_data = spec_id_bytes(&[(0x000B, 32)]);

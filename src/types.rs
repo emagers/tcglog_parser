@@ -493,14 +493,49 @@ impl Guid {
     /// assert_eq!(format!("{zero}"), "{00000000-0000-0000-0000-000000000000}");
     /// ```
     fn fmt_guid(&self) -> String {
+        // Pre-sized stack buffer: {8-4-4-4-12} = 38 ASCII bytes.
+        static HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut buf = [0u8; 38];
+        buf[0] = b'{';
+
+        // Helper: write a byte as two hex nibbles at `pos`.
+        #[inline(always)]
+        fn put(buf: &mut [u8; 38], pos: usize, b: u8) {
+            buf[pos] = HEX[(b >> 4) as usize];
+            buf[pos + 1] = HEX[(b & 0xf) as usize];
+        }
+
         let d1 = u32::from_le_bytes([self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3]]);
+        let d1b = d1.to_be_bytes();
+        put(&mut buf, 1, d1b[0]);
+        put(&mut buf, 3, d1b[1]);
+        put(&mut buf, 5, d1b[2]);
+        put(&mut buf, 7, d1b[3]);
+        buf[9] = b'-';
+
         let d2 = u16::from_le_bytes([self.bytes[4], self.bytes[5]]);
+        let d2b = d2.to_be_bytes();
+        put(&mut buf, 10, d2b[0]);
+        put(&mut buf, 12, d2b[1]);
+        buf[14] = b'-';
+
         let d3 = u16::from_le_bytes([self.bytes[6], self.bytes[7]]);
-        let d4 = &self.bytes[8..16];
-        format!(
-            "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
-            d1, d2, d3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7],
-        )
+        let d3b = d3.to_be_bytes();
+        put(&mut buf, 15, d3b[0]);
+        put(&mut buf, 17, d3b[1]);
+        buf[19] = b'-';
+
+        put(&mut buf, 20, self.bytes[8]);
+        put(&mut buf, 22, self.bytes[9]);
+        buf[24] = b'-';
+
+        for i in 0..6 {
+            put(&mut buf, 25 + i * 2, self.bytes[10 + i]);
+        }
+        buf[37] = b'}';
+
+        // SAFETY: `buf` contains only ASCII bytes from HEX + literal ASCII.
+        unsafe { String::from_utf8_unchecked(buf.to_vec()) }
     }
 }
 
@@ -554,7 +589,15 @@ impl From<String> for Guid {
 /// assert_eq!(to_hex(&[]), "");
 /// ```
 pub fn to_hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    // One allocation sized upfront; nibble lookup avoids any format! overhead.
+    static NIBBLES: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(NIBBLES[(b >> 4) as usize]);
+        out.push(NIBBLES[(b & 0xf) as usize]);
+    }
+    // SAFETY: `out` contains only ASCII bytes from `NIBBLES`.
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 /// Parses the numeric value out of an `"unknown(0xXXXX)"` string produced

@@ -674,8 +674,8 @@ pub struct SiPolicySignerPayload {
 ///
 /// The serialised form mirrors [`EventType`](crate::EventType): the JSON
 /// field value is the name string rather than a raw integer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(into = "String", from = "String")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(from = "String")]
 pub struct SipaEventType(u32);
 
 impl SipaEventType {
@@ -712,6 +712,19 @@ impl PartialEq<u32> for SipaEventType {
 
 impl From<SipaEventType> for String {
     fn from(t: SipaEventType) -> String { t.name() }
+}
+
+// Custom Serialize: write the &'static str name directly for known types,
+// avoiding the String allocation that `#[serde(into = "String")]` would cause.
+impl Serialize for SipaEventType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let n = sipa_event_name(self.0);
+        if n == "Unknown" {
+            serializer.serialize_str(&format!("Unknown({:#010x})", self.0))
+        } else {
+            serializer.serialize_str(n)
+        }
+    }
 }
 
 impl From<String> for SipaEventType {
@@ -1270,15 +1283,17 @@ fn decode_payload(event_type: u32, data: &[u8]) -> SipaEventData {
     }
 }
 
-/// Decode a UTF-16LE byte slice into a `String`, stripping a trailing null.
+/// Decode a UTF-16LE byte slice into a `String`, stripping trailing nulls.
 fn decode_utf16le(data: &[u8]) -> String {
     let u16s: Vec<u16> = data
         .chunks_exact(2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
         .collect();
-    String::from_utf16_lossy(&u16s)
-        .trim_matches('\0')
-        .to_string()
+    let mut s = String::from_utf16_lossy(&u16s);
+    // Trim trailing null chars in-place (avoids a second allocation).
+    let trimmed_len = s.trim_end_matches('\0').len();
+    s.truncate(trimmed_len);
+    s
 }
 
 // ── parse_si_policy_signer ────────────────────────────────────────────────────

@@ -4,7 +4,7 @@
 //! [`EventDataParser`] implementations before calling [`TcgLogParser::parse`].
 
 use crate::error::{Cursor, ParseError};
-use crate::event::{DigestValue, TcgLog, TcgPcrEvent, TcgPcrEvent2};
+use crate::event::{DigestValue, EventData, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 use crate::event_data::{
     SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables,
     UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData, WbclEventData,
@@ -424,12 +424,12 @@ impl TcgLogParser {
         event_type_raw: u32,
         data: &[u8],
         uintn_size: u8,
-    ) -> serde_json::Value {
+    ) -> EventData {
         // Try custom parsers first (in registration order).
         for parser in &self.custom_parsers {
             if parser.can_parse(event_type_raw) {
                 match parser.parse(event_type_raw, data) {
-                    Ok(v) => return v,
+                    Ok(v) => return EventData::Json(v),
                     Err(_) => break,
                 }
             }
@@ -455,17 +455,17 @@ fn parse_builtin_event_data(
     event_type: EventType,
     data: &[u8],
     uintn_size: u8,
-) -> serde_json::Value {
+) -> EventData {
     match event_type {
         // The SpecID event shows up as EV_NO_ACTION; also handle StartupLocality.
         EventType::NoAction => {
             if let Ok(Some(loc)) = StartupLocality::try_parse(data) {
-                return serde_json::to_value(loc).unwrap_or_else(raw_value);
+                return EventData::StartupLocality(loc);
             }
             if let Ok(spec) = SpecIdEvent::parse(data) {
-                return serde_json::to_value(spec).unwrap_or_else(raw_value);
+                return EventData::SpecId(spec);
             }
-            raw_hex(data)
+            EventData::Json(raw_hex(data))
         }
 
         // EFI variable events share the same payload structure.
@@ -473,8 +473,8 @@ fn parse_builtin_event_data(
         | EventType::EfiVariableBoot
         | EventType::EfiVariableBoot2
         | EventType::EfiVariableAuthority => match UefiVariableData::parse(data) {
-            Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
-            Err(_) => raw_hex(data),
+            Ok(v) => EventData::UefiVariable(v),
+            Err(_) => EventData::Json(raw_hex(data)),
         },
 
         // EFI image load events.
@@ -482,43 +482,43 @@ fn parse_builtin_event_data(
         | EventType::EfiBootServicesDriver
         | EventType::EfiRuntimeServicesDriver => {
             match UefiImageLoadEvent::parse(data, uintn_size) {
-                Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
-                Err(_) => raw_hex(data),
+                Ok(v) => EventData::UefiImageLoad(v),
+                Err(_) => EventData::Json(raw_hex(data)),
             }
         }
 
         // EFI firmware blob events.
         EventType::EfiFirmwareBlob => match UefiFirmwareBlob::parse(data) {
-            Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
-            Err(_) => raw_hex(data),
+            Ok(v) => EventData::FirmwareBlob(v),
+            Err(_) => EventData::Json(raw_hex(data)),
         },
 
         EventType::EfiFirmwareBlob2 => match UefiFirmwareBlob2::parse(data) {
-            Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
-            Err(_) => raw_hex(data),
+            Ok(v) => EventData::FirmwareBlob2(v),
+            Err(_) => EventData::Json(raw_hex(data)),
         },
 
         // EFI handoff tables.
         EventType::EfiHandoffTables => match UefiHandoffTables::parse(data, uintn_size) {
-            Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
-            Err(_) => raw_hex(data),
+            Ok(v) => EventData::HandoffTables(v),
+            Err(_) => EventData::Json(raw_hex(data)),
         },
 
         EventType::EfiHandoffTables2 => match UefiHandoffTables2::parse(data, uintn_size) {
-            Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
-            Err(_) => raw_hex(data),
+            Ok(v) => EventData::HandoffTables2(v),
+            Err(_) => EventData::Json(raw_hex(data)),
         },
 
         // EV_EVENT_TAG: Windows Boot Configuration Log (WBCL) / SIPA events.
         EventType::EventTag => match WbclEventData::parse(data) {
-            Ok(v) => serde_json::to_value(v).unwrap_or_else(raw_value),
-            Err(_) => raw_hex(data),
+            Ok(v) => EventData::Wbcl(v),
+            Err(_) => EventData::Json(raw_hex(data)),
         },
 
         // EV_EFI_ACTION and EV_ACTION: the payload is a UTF-8 / ASCII string.
         EventType::EfiAction | EventType::Action => {
             let text = String::from_utf8_lossy(data).into_owned();
-            serde_json::json!({ "action": text })
+            EventData::Json(serde_json::json!({ "action": text }))
         }
 
         // EV_S_CRTM_VERSION: UTF-16LE string.
@@ -530,27 +530,27 @@ fn parse_builtin_event_data(
             let text = String::from_utf16_lossy(&u16s)
                 .trim_matches('\0')
                 .to_string();
-            serde_json::json!({ "version": text })
+            EventData::Json(serde_json::json!({ "version": text }))
         }
 
         // EV_SEPARATOR: 4-byte value.
         EventType::Separator => {
             if data.len() >= 4 {
                 let v = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
-                serde_json::json!({ "value": v })
+                EventData::Json(serde_json::json!({ "value": v }))
             } else {
-                raw_hex(data)
+                EventData::Json(raw_hex(data))
             }
         }
 
         // EV_POST_CODE: UTF-8 string or raw bytes.
         EventType::PostCode => {
             let text = String::from_utf8_lossy(data).into_owned();
-            serde_json::json!({ "post_code": text })
+            EventData::Json(serde_json::json!({ "post_code": text }))
         }
 
         // Everything else: hex-encoded raw bytes.
-        _ => raw_hex(data),
+        _ => EventData::Json(raw_hex(data)),
     }
 }
 
@@ -579,10 +579,7 @@ fn raw_hex(data: &[u8]) -> serde_json::Value {
     serde_json::json!({ "raw": to_hex(data) })
 }
 
-/// Converts a serialisation error into a raw-hex fallback.
-fn raw_value(_: impl std::error::Error) -> serde_json::Value {
-    serde_json::json!({ "raw": "" })
-}
+
 
 /// Decode a lowercase hex string to bytes (best effort; odd chars → truncated).
 pub(crate) fn hex_decode(hex: &str) -> Vec<u8> {
@@ -878,8 +875,8 @@ mod tests {
             .parse(&raw)
             .unwrap();
 
-        // Custom parser overrides built-in; event_data should be null.
-        assert!(log.events[0].event_data.is_null());
+        // Custom parser overrides built-in; event_data should be Json(Null).
+        assert!(matches!(log.events[0].event_data, EventData::Json(serde_json::Value::Null)));
     }
 
     #[test]
@@ -901,7 +898,7 @@ mod tests {
             .unwrap();
 
         // The fixture event type is EV_NO_ACTION (3), not 0xA0000001.
-        assert!(!log.events[0].event_data.is_null());
+        assert!(!matches!(log.events[0].event_data, EventData::Json(serde_json::Value::Null)));
     }
 
     // ── TCG 1.2-only log (no SpecID) ─────────────────────────────────────────
@@ -966,14 +963,20 @@ mod tests {
     fn builtin_parser_efi_action() {
         let data = b"Calling EFI Application from Boot Option";
         let v = parse_builtin_event_data(EventType::EfiAction, data, 8);
-        assert_eq!(v["action"], "Calling EFI Application from Boot Option");
+        match v {
+            EventData::Json(ref j) => assert_eq!(j["action"], "Calling EFI Application from Boot Option"),
+            _ => panic!("expected EventData::Json"),
+        }
     }
 
     #[test]
     fn builtin_parser_separator() {
         let data = [0x00, 0x00, 0x00, 0x00];
         let v = parse_builtin_event_data(EventType::Separator, &data, 8);
-        assert_eq!(v["value"], 0);
+        match v {
+            EventData::Json(ref j) => assert_eq!(j["value"], 0),
+            _ => panic!("expected EventData::Json"),
+        }
     }
 
     #[test]
@@ -984,14 +987,20 @@ mod tests {
             .flat_map(|c| c.to_le_bytes())
             .collect();
         let v = parse_builtin_event_data(EventType::SCrtmVersion, &data, 8);
-        assert_eq!(v["version"], "1.0");
+        match v {
+            EventData::Json(ref j) => assert_eq!(j["version"], "1.0"),
+            _ => panic!("expected EventData::Json"),
+        }
     }
 
     #[test]
     fn builtin_parser_unknown_type_gives_raw() {
         let data = [0xDE, 0xAD];
         let v = parse_builtin_event_data(EventType::Unknown(0xFF), &data, 8);
-        assert_eq!(v["raw"], "dead");
+        match v {
+            EventData::Json(ref j) => assert_eq!(j["raw"], "dead"),
+            _ => panic!("expected EventData::Json"),
+        }
     }
 
     // ── PCR capping / warnings ────────────────────────────────────────────────

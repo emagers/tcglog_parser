@@ -372,7 +372,10 @@ pub struct UefiVariableData {
     pub variable_name: Guid,
     /// Name of the variable (UTF-16LE decoded to a Rust `String`).
     pub unicode_name: String,
-    /// Raw variable data, hex-encoded.
+    /// Raw variable data, hex-encoded.  Empty (and omitted from JSON) when
+    /// the data has been fully decoded into [`Self::certificate_info`] or
+    /// [`Self::signature_list`], avoiding redundant encoding of large blobs.
+    #[serde(skip_serializing_if = "is_empty_str")]
     pub variable_data: String,
     /// Decoded X.509 certificate information, present when `variable_data`
     /// contains an `EFI_SIGNATURE_DATA` record whose payload is a valid
@@ -387,6 +390,11 @@ pub struct UefiVariableData {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_list: Option<Vec<EfiSignatureList>>,
 }
+
+// Helper: is the variable_data field worth emitting?  It's redundant (and
+// large) when the data has already been fully decoded into `signature_list`
+// or `certificate_info`, so we suppress it in that case.
+fn is_empty_str(s: &str) -> bool { s.is_empty() }
 
 impl UefiVariableData {
     /// Parse a [`UefiVariableData`] from raw event-data bytes.
@@ -430,22 +438,39 @@ impl UefiVariableData {
         })?;
 
         let var_data = c.read_bytes(variable_data_length)?;
-        let variable_data = to_hex(var_data);
 
-        // For EV_EFI_VARIABLE_AUTHORITY the variable_data is an
-        // EFI_SIGNATURE_DATA structure: a 16-byte SignatureOwner GUID
-        // followed by a DER-encoded X.509 certificate.  Try to decode it;
-        // if this is any other variable type the parse will fail and we
-        // return None gracefully.
-        let certificate_info = if var_data.len() > 16 {
+        // Try the structured decoders cheapest-to-most-expensive.
+        // When one succeeds we skip the others and also skip the raw hex
+        // encoding — the data is already fully represented in structured form.
+
+        // (1) EFI_SIGNATURE_LIST (PK / KEK / db / dbx): the first 16 bytes
+        //     must be a known signature-type GUID, so this bails out in O(1)
+        //     for all non-database variable events.
+        let signature_list = parse_signature_lists(var_data);
+
+        // (2) Single DER X.509 cert (EV_EFI_VARIABLE_AUTHORITY): the data is
+        //     [16-byte SignatureOwner GUID][DER cert].  Only attempt when
+        //     signature_list failed (PK/KEK/db already handled above) and
+        //     the byte at offset 16 is the DER SEQUENCE tag (0x30), skipping
+        //     the attempt for BootOrder / Boot0000 / etc. at zero cost.
+        let certificate_info = if signature_list.is_none()
+            && var_data.len() > 17
+            && var_data[16] == 0x30
+        {
             try_decode_x509(&var_data[16..])
         } else {
             None
         };
 
-        // For Secure Boot database variables (PK, KEK, db, dbx) the
-        // variable_data is one or more EFI_SIGNATURE_LIST structures.
-        let signature_list = parse_signature_lists(var_data);
+        // (3) Raw hex fallback — only for variables that couldn't be decoded
+        //     above (SecureBoot, BootOrder, Boot0000, …).  Skipping this for
+        //     the decoded cases avoids ~8000 tiny allocs for the 8 KB dbx blob
+        //     and hundreds more for db / KEK / PK.
+        let variable_data = if certificate_info.is_none() && signature_list.is_none() {
+            to_hex(var_data)
+        } else {
+            String::new()
+        };
 
         Ok(Self {
             variable_name,
