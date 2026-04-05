@@ -43,6 +43,8 @@ use sha1::Digest as Sha1Digest;
 use sha1::Sha1;
 use sha2::Digest as Sha2Digest;
 use sha2::{Sha256, Sha384, Sha512};
+use sha3::Digest as Sha3Digest;
+use sha3::{Sha3_256, Sha3_384, Sha3_512};
 
 /// The maximum valid PCR index per the TCG PC Client Platform Firmware Profile
 /// Specification.  PCRs 0–23 are defined; indices ≥ 24 are out of range.
@@ -277,6 +279,24 @@ pub(crate) fn extend_pcr(alg: HashAlgorithmId, pcr: &[u8], digest: &[u8]) -> Vec
             Sha2Digest::update(&mut h, digest);
             Sha2Digest::finalize(h).to_vec()
         }
+        HashAlgorithmId::Sha3_256 => {
+            let mut h = Sha3_256::new();
+            Sha3Digest::update(&mut h, pcr);
+            Sha3Digest::update(&mut h, digest);
+            Sha3Digest::finalize(h).to_vec()
+        }
+        HashAlgorithmId::Sha3_384 => {
+            let mut h = Sha3_384::new();
+            Sha3Digest::update(&mut h, pcr);
+            Sha3Digest::update(&mut h, digest);
+            Sha3Digest::finalize(h).to_vec()
+        }
+        HashAlgorithmId::Sha3_512 => {
+            let mut h = Sha3_512::new();
+            Sha3Digest::update(&mut h, pcr);
+            Sha3Digest::update(&mut h, digest);
+            Sha3Digest::finalize(h).to_vec()
+        }
         // SM3-256 and Unknown: cannot emulate without the right hash function.
         _ => Vec::new(),
     }
@@ -308,6 +328,21 @@ pub(crate) fn hash_bytes(alg: HashAlgorithmId, data: &[u8]) -> Option<Vec<u8>> {
             Sha2Digest::update(&mut h, data);
             Some(Sha2Digest::finalize(h).to_vec())
         }
+        HashAlgorithmId::Sha3_256 => {
+            let mut h = Sha3_256::new();
+            Sha3Digest::update(&mut h, data);
+            Some(Sha3Digest::finalize(h).to_vec())
+        }
+        HashAlgorithmId::Sha3_384 => {
+            let mut h = Sha3_384::new();
+            Sha3Digest::update(&mut h, data);
+            Some(Sha3Digest::finalize(h).to_vec())
+        }
+        HashAlgorithmId::Sha3_512 => {
+            let mut h = Sha3_512::new();
+            Sha3Digest::update(&mut h, data);
+            Some(Sha3Digest::finalize(h).to_vec())
+        }
         _ => None,
     }
 }
@@ -320,6 +355,18 @@ pub(crate) fn separator_digests(alg: HashAlgorithmId) -> Option<(String, String)
     let normal = hash_bytes(alg, &[0x00, 0x00, 0x00, 0x00])?;
     let error = hash_bytes(alg, &[0xFF, 0xFF, 0xFF, 0xFF])?;
     Some((to_hex(&normal), to_hex(&error)))
+}
+
+/// Returns the error separator digest `H(0x00000001)` for a given algorithm.
+///
+/// Per the TCG PC Client Platform Firmware Profile Specification, an error
+/// separator is identified by its digest being `H(uint32(1))`, i.e. the hash
+/// of the four-byte little-endian encoding of the value 1.
+///
+/// Returns `None` if the algorithm is not supported for emulation.
+pub(crate) fn error_separator_digest(alg: HashAlgorithmId) -> Option<String> {
+    let d = hash_bytes(alg, &1u32.to_le_bytes())?;
+    Some(to_hex(&d))
 }
 
 #[cfg(test)]

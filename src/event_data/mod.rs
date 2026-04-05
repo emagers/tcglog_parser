@@ -6,7 +6,9 @@
 //! need to use these types directly.
 
 pub mod wbcl;
+pub mod device_path;
 pub use wbcl::WbclEventData;
+pub use device_path::EfiDevicePath;
 
 use crate::error::{Cursor, ParseError};
 use crate::types::{Guid, to_hex};
@@ -703,6 +705,9 @@ pub struct UefiImageLoadEvent {
     pub link_time_address: u64,
     /// Device path bytes, hex-encoded.
     pub device_path: String,
+    /// Decoded UEFI device path (if decoding succeeded).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_path_decoded: Option<EfiDevicePath>,
 }
 
 impl UefiImageLoadEvent {
@@ -739,12 +744,14 @@ impl UefiImageLoadEvent {
 
         let dp_bytes = c.read_bytes(length_of_device_path)?;
         let device_path = to_hex(dp_bytes);
+        let device_path_decoded = EfiDevicePath::parse(dp_bytes);
 
         Ok(Self {
             image_location_in_memory,
             length_of_image,
             link_time_address,
             device_path,
+            device_path_decoded,
         })
     }
 }
@@ -1004,6 +1011,529 @@ impl StartupLocality {
         let mut c = Cursor::new(&data[16..]);
         Ok(Some(Self {
             startup_locality: c.read_u8()?,
+        }))
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// TCG Tagged Event (EV_EVENT_TAG) — TCG_PCClientTaggedEvent
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Event data for `EV_EVENT_TAG` — the standard TCG `TCG_PCClientTaggedEvent`
+/// structure.
+///
+/// Per the TCG PC Client Implementation Specification, a tagged event carries
+/// a vendor-defined event ID and an opaque data payload.
+///
+/// On Windows, `EV_EVENT_TAG` events typically contain WBCL/SIPA sub-events.
+/// The parser tries WBCL decoding first; if that fails, this structure is
+/// used as the fallback.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TaggedEvent {
+    /// The vendor-defined event identifier.
+    pub event_id: u32,
+    /// The event data payload, hex-encoded.
+    pub data: String,
+}
+
+impl TaggedEvent {
+    /// Parse a [`TaggedEvent`] from raw event-data bytes.
+    ///
+    /// Layout:
+    /// ```text
+    /// u32  taggedEventID
+    /// u32  taggedEventDataSize
+    /// [u8; taggedEventDataSize]  taggedEventData
+    /// ```
+    pub fn parse(data: &[u8]) -> Result<Self, ParseError> {
+        let mut c = Cursor::new(data);
+        let event_id = c.read_u32_le()?;
+        let data_size = c.read_u32_le()? as usize;
+        let event_data = c.read_bytes(data_size)?;
+        Ok(Self {
+            event_id,
+            data: to_hex(event_data),
+        })
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// EFI GPT event (EV_EFI_GPT_EVENT / EV_EFI_GPT_EVENT2)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// UEFI GPT partition table header.
+///
+/// Corresponds to the `EFI_PARTITION_TABLE_HEADER` in the UEFI specification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GptHeader {
+    /// Signature — must be `"EFI PART"`.
+    pub signature: String,
+    /// Revision (e.g. `0x00010000` for 1.0).
+    pub revision: u32,
+    /// Header size in bytes (usually 92).
+    pub header_size: u32,
+    /// CRC32 of the header.
+    pub header_crc32: u32,
+    /// LBA of this header.
+    pub my_lba: u64,
+    /// LBA of the alternate header.
+    pub alternate_lba: u64,
+    /// First usable LBA for partitions.
+    pub first_usable_lba: u64,
+    /// Last usable LBA for partitions.
+    pub last_usable_lba: u64,
+    /// Disk GUID.
+    pub disk_guid: Guid,
+    /// Starting LBA of the partition entry array.
+    pub partition_entry_lba: u64,
+    /// Number of partition entries.
+    pub number_of_partition_entries: u32,
+    /// Size of each partition entry in bytes.
+    pub size_of_partition_entry: u32,
+    /// CRC32 of the partition entry array.
+    pub partition_entry_array_crc32: u32,
+}
+
+/// A single GPT partition entry.
+///
+/// Corresponds to `EFI_PARTITION_ENTRY` in the UEFI specification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GptPartitionEntry {
+    /// Partition type GUID.
+    pub partition_type_guid: Guid,
+    /// Unique partition GUID.
+    pub unique_partition_guid: Guid,
+    /// Starting LBA.
+    pub starting_lba: u64,
+    /// Ending LBA (inclusive).
+    pub ending_lba: u64,
+    /// Attribute flags.
+    pub attributes: u64,
+    /// Partition name (UTF-16LE decoded).
+    pub name: String,
+}
+
+/// Event data for `EV_EFI_GPT_EVENT` and `EV_EFI_GPT_EVENT2`.
+///
+/// Corresponds to `UEFI_GPT_DATA` in the TCG PC Client Platform Firmware
+/// Profile Specification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EfiGptData {
+    /// The GPT partition table header.
+    pub header: GptHeader,
+    /// The partition entries measured.
+    pub partitions: Vec<GptPartitionEntry>,
+}
+
+impl EfiGptData {
+    /// Parse an [`EfiGptData`] from raw event-data bytes.
+    pub fn parse(data: &[u8]) -> Result<Self, ParseError> {
+        let mut c = Cursor::new(data);
+
+        // Parse GPT header (92 bytes minimum).
+        let sig_bytes = c.read_bytes(8)?;
+        let signature = String::from_utf8_lossy(sig_bytes).into_owned();
+        let revision = c.read_u32_le()?;
+        let header_size = c.read_u32_le()?;
+        let header_crc32 = c.read_u32_le()?;
+        let _reserved = c.read_u32_le()?;
+        let my_lba = c.read_u64_le()?;
+        let alternate_lba = c.read_u64_le()?;
+        let first_usable_lba = c.read_u64_le()?;
+        let last_usable_lba = c.read_u64_le()?;
+        let disk_guid_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+        let disk_guid = Guid::from_bytes(disk_guid_bytes);
+        let partition_entry_lba = c.read_u64_le()?;
+        let number_of_partition_entries = c.read_u32_le()?;
+        let size_of_partition_entry = c.read_u32_le()?;
+        let partition_entry_array_crc32 = c.read_u32_le()?;
+
+        let header = GptHeader {
+            signature,
+            revision,
+            header_size,
+            header_crc32,
+            my_lba,
+            alternate_lba,
+            first_usable_lba,
+            last_usable_lba,
+            disk_guid,
+            partition_entry_lba,
+            number_of_partition_entries,
+            size_of_partition_entry,
+            partition_entry_array_crc32,
+        };
+
+        // Number of partitions in the event data (u64 per TCG spec).
+        let num_partitions = c.read_u64_le()? as usize;
+
+        let mut partitions = Vec::with_capacity(num_partitions);
+        for _ in 0..num_partitions {
+            let part_type_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+            let unique_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+            let starting_lba = c.read_u64_le()?;
+            let ending_lba = c.read_u64_le()?;
+            let attributes = c.read_u64_le()?;
+            // Partition name: 36 UTF-16LE characters (72 bytes) for standard
+            // 128-byte entries. For non-standard sizes, compute from entry size.
+            let name_bytes_len = if size_of_partition_entry >= 128 {
+                72 // 36 UTF-16LE chars
+            } else {
+                (size_of_partition_entry as usize).saturating_sub(56)
+            };
+            let name_bytes = c.read_bytes(name_bytes_len)?;
+            let name_u16: Vec<u16> = name_bytes
+                .chunks_exact(2)
+                .map(|b| u16::from_le_bytes([b[0], b[1]]))
+                .collect();
+            let name = String::from_utf16_lossy(&name_u16)
+                .trim_matches('\0')
+                .to_string();
+
+            // Skip any remaining bytes in the partition entry.
+            let consumed = 56 + name_bytes_len;
+            if size_of_partition_entry as usize > consumed {
+                let _ = c.read_bytes(size_of_partition_entry as usize - consumed);
+            }
+
+            partitions.push(GptPartitionEntry {
+                partition_type_guid: Guid::from_bytes(part_type_bytes),
+                unique_partition_guid: Guid::from_bytes(unique_bytes),
+                starting_lba,
+                ending_lba,
+                attributes,
+                name,
+            });
+        }
+
+        Ok(Self { header, partitions })
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SpecIdEvent00 (legacy BIOS, TCG PC Client Implementation Spec §11.3.4.1)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Expected signature bytes for SpecIdEvent00.
+const SPEC_ID_EVENT00_SIGNATURE: &[u8; 16] = b"Spec ID Event00\0";
+
+/// The SpecID event for conventional BIOS (TCG 1.2).
+///
+/// Found in the first event of a legacy BIOS TCG log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpecIdEvent00 {
+    /// ASCII signature — always `"Spec ID Event00"`.
+    pub signature: String,
+    /// Platform class (desktop = 0, server = 1, …).
+    pub platform_class: u32,
+    /// Minor version of the specification.
+    pub spec_version_minor: u8,
+    /// Major version of the specification.
+    pub spec_version_major: u8,
+    /// Errata level.
+    pub spec_errata: u8,
+    /// Vendor-defined information bytes (may be empty).
+    pub vendor_info: String,
+}
+
+impl SpecIdEvent00 {
+    /// Try to parse a [`SpecIdEvent00`] from raw event-data bytes.
+    /// Returns `None` if the signature does not match.
+    pub fn try_parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
+        if data.len() < 16 {
+            return Ok(None);
+        }
+        if &data[..16] != SPEC_ID_EVENT00_SIGNATURE {
+            return Ok(None);
+        }
+        let mut c = Cursor::new(&data[16..]);
+        let platform_class = c.read_u32_le()?;
+        let spec_version_minor = c.read_u8()?;
+        let spec_version_major = c.read_u8()?;
+        let spec_errata = c.read_u8()?;
+        let _reserved = c.read_u8()?;
+        let vendor_info_size = c.read_u8()? as usize;
+        let vendor_info_bytes = c.read_bytes(vendor_info_size)?;
+        Ok(Some(Self {
+            signature: "Spec ID Event00".to_string(),
+            platform_class,
+            spec_version_minor,
+            spec_version_major,
+            spec_errata,
+            vendor_info: to_hex(vendor_info_bytes),
+        }))
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SpecIdEvent02 (EFI 1.2, TCG EFI Platform Spec §7.4)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Expected signature bytes for SpecIdEvent02.
+const SPEC_ID_EVENT02_SIGNATURE: &[u8; 16] = b"Spec ID Event02\0";
+
+/// The SpecID event for EFI 1.2 (non-crypto-agile).
+///
+/// Found in the first event of a TCG 1.2 EFI log.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpecIdEvent02 {
+    /// ASCII signature — always `"Spec ID Event02"`.
+    pub signature: String,
+    /// Platform class.
+    pub platform_class: u32,
+    /// Minor version of the specification.
+    pub spec_version_minor: u8,
+    /// Major version of the specification.
+    pub spec_version_major: u8,
+    /// Errata level.
+    pub spec_errata: u8,
+    /// Size of `UINTN` in bytes on the platform (4 or 8).
+    pub uintn_size: u8,
+    /// Vendor-defined information bytes (may be empty).
+    pub vendor_info: String,
+}
+
+impl SpecIdEvent02 {
+    /// Try to parse a [`SpecIdEvent02`] from raw event-data bytes.
+    /// Returns `None` if the signature does not match.
+    pub fn try_parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
+        if data.len() < 16 {
+            return Ok(None);
+        }
+        if &data[..16] != SPEC_ID_EVENT02_SIGNATURE {
+            return Ok(None);
+        }
+        let mut c = Cursor::new(&data[16..]);
+        let platform_class = c.read_u32_le()?;
+        let spec_version_minor = c.read_u8()?;
+        let spec_version_major = c.read_u8()?;
+        let spec_errata = c.read_u8()?;
+        let uintn_size = c.read_u8()?;
+        let vendor_info_size = c.read_u8()? as usize;
+        let vendor_info_bytes = c.read_bytes(vendor_info_size)?;
+        Ok(Some(Self {
+            signature: "Spec ID Event02".to_string(),
+            platform_class,
+            spec_version_minor,
+            spec_version_major,
+            spec_errata,
+            uintn_size,
+            vendor_info: to_hex(vendor_info_bytes),
+        }))
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SP800-155 Platform ID events (EV_NO_ACTION sub-types)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// SP 800-155 Platform Firmware Reference Integrity Manifest event.
+///
+/// Signature: `"SP800-155 Event\0"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sp800155Event {
+    /// Vendor identifier.
+    pub vendor_id: u32,
+    /// Reference manifest GUID.
+    pub reference_manifest_guid: Guid,
+}
+
+impl Sp800155Event {
+    const SIGNATURE: &[u8; 16] = b"SP800-155 Event\0";
+
+    /// Try to parse. Returns `None` if signature doesn't match.
+    pub fn try_parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
+        if data.len() < 16 || &data[..16] != Self::SIGNATURE {
+            return Ok(None);
+        }
+        let mut c = Cursor::new(&data[16..]);
+        let vendor_id = c.read_u32_le()?;
+        let guid_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+        Ok(Some(Self {
+            vendor_id,
+            reference_manifest_guid: Guid::from_bytes(guid_bytes),
+        }))
+    }
+}
+
+/// SP 800-155 Platform Firmware Reference Integrity Manifest event v2.
+///
+/// Signature: `"SP800-155 Event2"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sp800155Event2 {
+    /// Platform manufacturer identifier.
+    pub platform_manufacturer_id: u32,
+    /// Reference manifest GUID.
+    pub reference_manifest_guid: Guid,
+    /// Platform manufacturer string.
+    pub platform_manufacturer: String,
+    /// Platform model string.
+    pub platform_model: String,
+    /// Platform version string.
+    pub platform_version: String,
+    /// Firmware manufacturer string.
+    pub firmware_manufacturer: String,
+    /// Firmware manufacturer identifier.
+    pub firmware_manufacturer_id: u32,
+    /// Firmware version string.
+    pub firmware_version: String,
+}
+
+impl Sp800155Event2 {
+    const SIGNATURE: &[u8; 16] = b"SP800-155 Event2";
+
+    /// Read a u8-length-prefixed null-terminated ASCII string.
+    fn read_prefixed_string(c: &mut Cursor<'_>) -> Result<String, ParseError> {
+        let len = c.read_u8()? as usize;
+        let bytes = c.read_bytes(len)?;
+        // Strip trailing null if present.
+        let s = if bytes.last() == Some(&0) {
+            &bytes[..bytes.len() - 1]
+        } else {
+            bytes
+        };
+        Ok(String::from_utf8_lossy(s).into_owned())
+    }
+
+    /// Try to parse. Returns `None` if signature doesn't match.
+    pub fn try_parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
+        if data.len() < 16 || &data[..16] != Self::SIGNATURE {
+            return Ok(None);
+        }
+        let mut c = Cursor::new(&data[16..]);
+        let platform_manufacturer_id = c.read_u32_le()?;
+        let guid_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+        let reference_manifest_guid = Guid::from_bytes(guid_bytes);
+        let platform_manufacturer = Self::read_prefixed_string(&mut c)?;
+        let platform_model = Self::read_prefixed_string(&mut c)?;
+        let platform_version = Self::read_prefixed_string(&mut c)?;
+        let firmware_manufacturer = Self::read_prefixed_string(&mut c)?;
+        let firmware_manufacturer_id = c.read_u32_le()?;
+        let firmware_version = Self::read_prefixed_string(&mut c)?;
+        Ok(Some(Self {
+            platform_manufacturer_id,
+            reference_manifest_guid,
+            platform_manufacturer,
+            platform_model,
+            platform_version,
+            firmware_manufacturer,
+            firmware_manufacturer_id,
+            firmware_version,
+        }))
+    }
+}
+
+/// SP 800-155 Platform Firmware Reference Integrity Manifest event v3.
+///
+/// Signature: `"SP800-155 Event3"`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Sp800155Event3 {
+    /// Platform manufacturer identifier.
+    pub platform_manufacturer_id: u32,
+    /// Reference manifest GUID.
+    pub reference_manifest_guid: Guid,
+    /// Platform manufacturer string.
+    pub platform_manufacturer: String,
+    /// Platform model string.
+    pub platform_model: String,
+    /// Platform version string.
+    pub platform_version: String,
+    /// Firmware manufacturer string.
+    pub firmware_manufacturer: String,
+    /// Firmware manufacturer identifier.
+    pub firmware_manufacturer_id: u32,
+    /// Firmware version string.
+    pub firmware_version: String,
+    /// RIM locator type.
+    pub rim_locator_type: u32,
+    /// RIM locator data, hex-encoded.
+    pub rim_locator: String,
+    /// Platform cert locator type.
+    pub platform_cert_locator_type: u32,
+    /// Platform cert locator data, hex-encoded.
+    pub platform_cert_locator: String,
+}
+
+impl Sp800155Event3 {
+    const SIGNATURE: &[u8; 16] = b"SP800-155 Event3";
+
+    /// Try to parse. Returns `None` if signature doesn't match.
+    pub fn try_parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
+        if data.len() < 16 || &data[..16] != Self::SIGNATURE {
+            return Ok(None);
+        }
+        let mut c = Cursor::new(&data[16..]);
+        let platform_manufacturer_id = c.read_u32_le()?;
+        let guid_bytes: [u8; 16] = c.read_bytes(16)?.try_into().unwrap();
+        let reference_manifest_guid = Guid::from_bytes(guid_bytes);
+        let platform_manufacturer = Sp800155Event2::read_prefixed_string(&mut c)?;
+        let platform_model = Sp800155Event2::read_prefixed_string(&mut c)?;
+        let platform_version = Sp800155Event2::read_prefixed_string(&mut c)?;
+        let firmware_manufacturer = Sp800155Event2::read_prefixed_string(&mut c)?;
+        let firmware_manufacturer_id = c.read_u32_le()?;
+        let firmware_version = Sp800155Event2::read_prefixed_string(&mut c)?;
+        let rim_locator_type = c.read_u32_le()?;
+        let rim_locator_size = c.read_u32_le()? as usize;
+        let rim_locator_bytes = c.read_bytes(rim_locator_size)?;
+        let rim_locator = to_hex(rim_locator_bytes);
+        let platform_cert_locator_type = c.read_u32_le()?;
+        let platform_cert_locator_size = c.read_u32_le()? as usize;
+        let platform_cert_locator_bytes = c.read_bytes(platform_cert_locator_size)?;
+        let platform_cert_locator = to_hex(platform_cert_locator_bytes);
+        Ok(Some(Self {
+            platform_manufacturer_id,
+            reference_manifest_guid,
+            platform_manufacturer,
+            platform_model,
+            platform_version,
+            firmware_manufacturer,
+            firmware_manufacturer_id,
+            firmware_version,
+            rim_locator_type,
+            rim_locator,
+            platform_cert_locator_type,
+            platform_cert_locator,
+        }))
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// H-CRTM Component Measurement event (EV_NO_ACTION sub-type)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Expected signature for the H-CRTM Component Measurement event.
+const HCRTM_COMP_MEAS_SIGNATURE: &[u8; 16] = b"H-CRTM CompMeas\0";
+
+/// Event data for the `H-CRTM CompMeas` sub-type of `EV_NO_ACTION`.
+///
+/// Records an H-CRTM component measurement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HcrtmComponentEvent {
+    /// Description of the component (ASCII).
+    pub component_description: String,
+    /// Measurement format type (0 = digest, 0x80 = raw data).
+    pub measurement_format_type: u8,
+    /// The component measurement data, hex-encoded.
+    pub component_measurement: String,
+}
+
+impl HcrtmComponentEvent {
+    /// Try to parse. Returns `None` if signature doesn't match.
+    pub fn try_parse(data: &[u8]) -> Result<Option<Self>, ParseError> {
+        if data.len() < 16 || &data[..16] != HCRTM_COMP_MEAS_SIGNATURE {
+            return Ok(None);
+        }
+        let mut c = Cursor::new(&data[16..]);
+        let desc_size = c.read_u8()? as usize;
+        let desc_bytes = c.read_bytes(desc_size)?;
+        let component_description = String::from_utf8_lossy(desc_bytes).into_owned();
+        let measurement_format_type = c.read_u8()?;
+        let meas_size = c.read_u16_le()? as usize;
+        let meas_bytes = c.read_bytes(meas_size)?;
+        Ok(Some(Self {
+            component_description,
+            measurement_format_type,
+            component_measurement: to_hex(meas_bytes),
         }))
     }
 }

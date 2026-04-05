@@ -39,12 +39,30 @@ pub enum ParseWarning {
         pcr_index: u32,
     },
 
-    /// An [`EV_SEPARATOR`](crate::EventType::Separator) event contained the
-    /// error sentinel value (`0xFFFFFFFF`), indicating that a firmware error
-    /// occurred during pre-boot.
+    /// An [`EV_SEPARATOR`](crate::EventType::Separator) event was detected as
+    /// an **error separator** because at least one of its digests matches the
+    /// pre-computed hash of the error sentinel value (`0x00000001`).
+    ///
+    /// Per the TCG PC Client Platform Firmware Profile Specification, when a
+    /// firmware error occurs during pre-boot, the separator digests are set to
+    /// `H(0x00000001)` and the event data contains implementation-defined
+    /// error information.
     ErrorSeparator {
         /// The zero-based PCR index.
         pcr_index: u32,
+    },
+
+    /// An [`EV_SEPARATOR`](crate::EventType::Separator) event contained an
+    /// unrecognised event data value.
+    ///
+    /// The TCG spec defines two valid normal separator values: `0x00000000`
+    /// and `0xFFFFFFFF`.  Any other 4-byte value (when not an error
+    /// separator) may indicate firmware misbehaviour.
+    UnknownSeparatorValue {
+        /// The zero-based PCR index.
+        pcr_index: u32,
+        /// The unexpected separator value.
+        value: u32,
     },
 
     /// An event that is **not** an [`EV_SEPARATOR`](crate::EventType::Separator)

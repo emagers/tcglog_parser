@@ -1,8 +1,10 @@
 //! Core event structures for TCG 1.2 and TCG 2.0 event logs.
 
 use crate::event_data::{
-    SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables,
-    UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData, WbclEventData,
+    EfiGptData, HcrtmComponentEvent, SpecIdEvent, SpecIdEvent00, SpecIdEvent02,
+    Sp800155Event, Sp800155Event2, Sp800155Event3, StartupLocality, TaggedEvent,
+    UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables, UefiHandoffTables2,
+    UefiImageLoadEvent, UefiVariableData, WbclEventData,
 };
 use crate::pcr::PcrBank;
 use crate::types::{EventType, HashAlgorithmId, to_hex};
@@ -90,8 +92,20 @@ impl DigestValue {
 pub enum EventData {
     /// Startup locality (`EV_NO_ACTION` sub-type).
     StartupLocality(StartupLocality),
-    /// SpecID event (`EV_NO_ACTION` sub-type).
+    /// SpecID event (`EV_NO_ACTION` sub-type, TCG 2.0 crypto-agile).
     SpecId(SpecIdEvent),
+    /// SpecID event for conventional BIOS (`EV_NO_ACTION` sub-type).
+    SpecId00(SpecIdEvent00),
+    /// SpecID event for EFI 1.2 (`EV_NO_ACTION` sub-type).
+    SpecId02(SpecIdEvent02),
+    /// SP 800-155 reference manifest event (`EV_NO_ACTION` sub-type).
+    Sp800155(Sp800155Event),
+    /// SP 800-155 reference manifest event v2 (`EV_NO_ACTION` sub-type).
+    Sp800155v2(Sp800155Event2),
+    /// SP 800-155 reference manifest event v3 (`EV_NO_ACTION` sub-type).
+    Sp800155v3(Sp800155Event3),
+    /// H-CRTM component measurement (`EV_NO_ACTION` sub-type).
+    HcrtmComponent(HcrtmComponentEvent),
     /// UEFI variable (`EV_EFI_VARIABLE_*`).
     UefiVariable(UefiVariableData),
     /// UEFI image load (`EV_EFI_BOOT_SERVICES_APPLICATION`, etc.).
@@ -104,7 +118,11 @@ pub enum EventData {
     HandoffTables(UefiHandoffTables),
     /// UEFI handoff tables 2 (`EV_EFI_HANDOFF_TABLES2`).
     HandoffTables2(UefiHandoffTables2),
-    /// Windows Boot Configuration Log (`EV_EVENT_TAG`).
+    /// EFI GPT partition table event (`EV_EFI_GPT_EVENT` / `EV_EFI_GPT_EVENT2`).
+    EfiGpt(EfiGptData),
+    /// TCG Tagged Event (`EV_EVENT_TAG` — standard `TCG_PCClientTaggedEvent`).
+    Tagged(TaggedEvent),
+    /// Windows Boot Configuration Log (`EV_EVENT_TAG` — Windows SIPA sub-events).
     Wbcl(WbclEventData),
     /// Any other event, stored as a generic JSON value (custom parsers,
     /// inline JSON for actions/separators, or raw hex fallback).

@@ -6,10 +6,12 @@
 use crate::error::{Cursor, ParseError};
 use crate::event::{DigestValue, EventData, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 use crate::event_data::{
-    SpecIdEvent, StartupLocality, UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables,
-    UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData, WbclEventData,
+    EfiGptData, HcrtmComponentEvent, SpecIdEvent, SpecIdEvent00, SpecIdEvent02,
+    Sp800155Event, Sp800155Event2, Sp800155Event3, StartupLocality, TaggedEvent,
+    UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables, UefiHandoffTables2,
+    UefiImageLoadEvent, UefiVariableData, WbclEventData,
 };
-use crate::pcr::{MAX_PCR_INDEX, PcrState, separator_digests};
+use crate::pcr::{MAX_PCR_INDEX, PcrState, separator_digests, error_separator_digest};
 use crate::types::{EventType, HashAlgorithmId, to_hex};
 use crate::warning::ParseWarning;
 
@@ -240,6 +242,12 @@ impl TcgLogParser {
                 .map(|(alg, _)| (*alg, separator_digests(*alg)))
                 .collect();
 
+            // Pre-compute error separator digests H(0x00000001) for each algorithm.
+            let err_sep_digests: Vec<(HashAlgorithmId, Option<String>)> = alg_map
+                .iter()
+                .map(|(alg, _)| (*alg, error_separator_digest(*alg)))
+                .collect();
+
             // Initialise PCR emulation state.
             let mut pcr_state = PcrState::new(&alg_map);
 
@@ -250,6 +258,7 @@ impl TcgLogParser {
                     &alg_map,
                     uintn_size,
                     &sep_digests,
+                    &err_sep_digests,
                     &mut pcr_state,
                 )?;
                 events.push(ev);
@@ -282,6 +291,7 @@ impl TcgLogParser {
         alg_map: &[(HashAlgorithmId, usize)],
         uintn_size: u8,
         sep_digests: &[(HashAlgorithmId, Option<(String, String)>)],
+        err_sep_digests: &[(HashAlgorithmId, Option<String>)],
         pcr_state: &mut PcrState,
     ) -> Result<TcgPcrEvent2, ParseError> {
         let pcr_index = cursor.read_u32_le()?;
@@ -346,7 +356,7 @@ impl TcgLogParser {
 
         // ── PCR capping / suspicious digest checks ────────────────────────
         if event_type == EventType::Separator {
-            self.handle_separator(pcr_index, &event_bytes, pcr_state, &mut warnings);
+            self.handle_separator(pcr_index, &event_bytes, &digests, err_sep_digests, pcr_state, &mut warnings);
         } else if event_type != EventType::NoAction {
             // Non-separator, non-no-action: check for post-cap and suspicious digests.
             if pcr_index <= MAX_PCR_INDEX && pcr_state.is_capped(pcr_index) {
@@ -390,10 +400,16 @@ impl TcgLogParser {
     }
 
     /// Handle an EV_SEPARATOR event: validate data, update cap state, emit warnings.
+    ///
+    /// Per the TCG PC Client Platform Firmware Profile Specification:
+    /// - Normal separator: event data = `0x00000000` or `0xFFFFFFFF`, digest = `H(event_data)`
+    /// - Error separator: digest = `H(0x00000001)`, event data = implementation-defined error info
     fn handle_separator(
         &self,
         pcr_index: u32,
         event_bytes: &[u8],
+        digests: &[DigestValue],
+        err_sep_digests: &[(HashAlgorithmId, Option<String>)],
         pcr_state: &mut PcrState,
         warnings: &mut Vec<ParseWarning>,
     ) {
@@ -408,11 +424,29 @@ impl TcgLogParser {
             pcr_state.cap(pcr_index);
         }
 
-        // Check for error separator: event data != 0x00000000.
-        if let Ok(bytes) = <&[u8; 4]>::try_from(&event_bytes[..event_bytes.len().min(4)])
-            && u32::from_le_bytes(*bytes) != 0x00000000
-        {
+        // Detect error separator by checking if any digest matches H(0x00000001).
+        let is_error = digests.iter().any(|dv| {
+            err_sep_digests
+                .iter()
+                .find(|(alg, _)| *alg == dv.hash_alg)
+                .and_then(|(_, d)| d.as_ref())
+                .is_some_and(|err_digest| dv.digest_hex() == *err_digest)
+        });
+
+        if is_error {
             warnings.push(ParseWarning::ErrorSeparator { pcr_index });
+        } else if event_bytes.len() >= 4 {
+            // Validate event data for non-error separators.
+            let value = u32::from_le_bytes([
+                event_bytes[0],
+                event_bytes[1],
+                event_bytes[2],
+                event_bytes[3],
+            ]);
+            // 0x00000000 (normal) and 0xFFFFFFFF (alt-normal) are both valid.
+            if value != 0x00000000 && value != 0xFFFFFFFF {
+                warnings.push(ParseWarning::UnknownSeparatorValue { pcr_index, value });
+            }
         }
     }
 
@@ -456,13 +490,33 @@ fn parse_builtin_event_data(
     uintn_size: u8,
 ) -> EventData {
     match event_type {
-        // The SpecID event shows up as EV_NO_ACTION; also handle StartupLocality.
+        // EV_NO_ACTION: dispatch on 16-byte signature.
+        // Order: StartupLocality, SpecIdEvent03, SpecIdEvent02, SpecIdEvent00,
+        //        SP800-155 Event/2/3, H-CRTM CompMeas, fallback.
         EventType::NoAction => {
             if let Ok(Some(loc)) = StartupLocality::try_parse(data) {
                 return EventData::StartupLocality(loc);
             }
             if let Ok(spec) = SpecIdEvent::parse(data) {
                 return EventData::SpecId(spec);
+            }
+            if let Ok(Some(spec)) = SpecIdEvent02::try_parse(data) {
+                return EventData::SpecId02(spec);
+            }
+            if let Ok(Some(spec)) = SpecIdEvent00::try_parse(data) {
+                return EventData::SpecId00(spec);
+            }
+            if let Ok(Some(ev)) = Sp800155Event3::try_parse(data) {
+                return EventData::Sp800155v3(ev);
+            }
+            if let Ok(Some(ev)) = Sp800155Event2::try_parse(data) {
+                return EventData::Sp800155v2(ev);
+            }
+            if let Ok(Some(ev)) = Sp800155Event::try_parse(data) {
+                return EventData::Sp800155(ev);
+            }
+            if let Ok(Some(ev)) = HcrtmComponentEvent::try_parse(data) {
+                return EventData::HcrtmComponent(ev);
             }
             EventData::Json(raw_hex(data))
         }
@@ -508,11 +562,22 @@ fn parse_builtin_event_data(
             Err(_) => EventData::Json(raw_hex(data)),
         },
 
-        // EV_EVENT_TAG: Windows Boot Configuration Log (WBCL) / SIPA events.
-        EventType::EventTag => match WbclEventData::parse(data) {
-            Ok(v) => EventData::Wbcl(v),
+        // EFI GPT events.
+        EventType::EfiGptEvent | EventType::EfiGptEvent2 => match EfiGptData::parse(data) {
+            Ok(v) => EventData::EfiGpt(v),
             Err(_) => EventData::Json(raw_hex(data)),
         },
+
+        // EV_EVENT_TAG: try WBCL/SIPA first (Windows), then standard TCG TaggedEvent.
+        EventType::EventTag => {
+            if let Ok(v) = WbclEventData::parse(data) {
+                return EventData::Wbcl(v);
+            }
+            if let Ok(v) = TaggedEvent::parse(data) {
+                return EventData::Tagged(v);
+            }
+            EventData::Json(raw_hex(data))
+        }
 
         // EV_EFI_ACTION and EV_ACTION: the payload is a UTF-8 / ASCII string.
         EventType::EfiAction | EventType::Action => {
@@ -520,8 +585,14 @@ fn parse_builtin_event_data(
             EventData::Json(serde_json::json!({ "action": text }))
         }
 
-        // EV_S_CRTM_VERSION: UTF-16LE string.
+        // EV_S_CRTM_VERSION: null-terminated UCS-2 string, or GUID (16 bytes).
         EventType::SCrtmVersion => {
+            if data.len() == 16 {
+                // Exactly 16 bytes → interpret as a GUID.
+                let guid_bytes: [u8; 16] = data.try_into().unwrap();
+                let guid = crate::types::Guid::from_bytes(guid_bytes);
+                return EventData::Json(serde_json::json!({ "guid": guid.to_string() }));
+            }
             let u16s: Vec<u16> = data
                 .chunks_exact(2)
                 .map(|b| u16::from_le_bytes([b[0], b[1]]))
@@ -542,15 +613,79 @@ fn parse_builtin_event_data(
             }
         }
 
-        // EV_POST_CODE: UTF-8 string or raw bytes.
+        // EV_POST_CODE: printable ASCII string, or EFIPlatformFirmwareBlob.
         EventType::PostCode => {
+            if is_printable_ascii(data) {
+                let text = String::from_utf8_lossy(data).into_owned();
+                EventData::Json(serde_json::json!({ "post_code": text }))
+            } else if let Ok(blob) = UefiFirmwareBlob::parse(data) {
+                EventData::FirmwareBlob(blob)
+            } else {
+                EventData::Json(raw_hex(data))
+            }
+        }
+
+        // EV_POST_CODE2: printable ASCII string, or EFIPlatformFirmwareBlob2.
+        EventType::PostCode2 => {
+            if is_printable_ascii(data) {
+                let text = String::from_utf8_lossy(data).into_owned();
+                EventData::Json(serde_json::json!({ "post_code": text }))
+            } else if let Ok(blob) = UefiFirmwareBlob2::parse(data) {
+                EventData::FirmwareBlob2(blob)
+            } else {
+                EventData::Json(raw_hex(data))
+            }
+        }
+
+        // EV_S_CRTM_CONTENTS: null-terminated ASCII, FirmwareBlob, or FirmwareBlob2.
+        EventType::SCrtmContents => {
+            if is_printable_ascii(data) {
+                let text = String::from_utf8_lossy(data)
+                    .trim_matches('\0')
+                    .to_string();
+                EventData::Json(serde_json::json!({ "contents": text }))
+            } else if data.len() == 16 {
+                if let Ok(blob) = UefiFirmwareBlob::parse(data) {
+                    return EventData::FirmwareBlob(blob);
+                }
+                EventData::Json(raw_hex(data))
+            } else if let Ok(blob) = UefiFirmwareBlob2::parse(data) {
+                EventData::FirmwareBlob2(blob)
+            } else {
+                EventData::Json(raw_hex(data))
+            }
+        }
+
+        // EV_COMPACT_HASH: informational string.
+        EventType::CompactHash => {
             let text = String::from_utf8_lossy(data).into_owned();
-            EventData::Json(serde_json::json!({ "post_code": text }))
+            EventData::Json(serde_json::json!({ "info": text }))
+        }
+
+        // EV_EFI_HCRTM_EVENT: should contain the string "HCRTM".
+        EventType::EfiHcrtmEvent => {
+            let text = String::from_utf8_lossy(data).into_owned();
+            EventData::Json(serde_json::json!({ "hcrtm": text }))
+        }
+
+        // EV_OMIT_BOOT_DEVICE_EVENTS: should contain "BOOT ATTEMPTS OMITTED".
+        EventType::OmitBootDeviceEvents => {
+            let text = String::from_utf8_lossy(data).into_owned();
+            EventData::Json(serde_json::json!({ "message": text }))
         }
 
         // Everything else: hex-encoded raw bytes.
         _ => EventData::Json(raw_hex(data)),
     }
+}
+
+/// Check if a byte slice contains only printable ASCII characters
+/// (0x20–0x7E, plus common control chars like tab, newline, null terminator).
+fn is_printable_ascii(data: &[u8]) -> bool {
+    !data.is_empty()
+        && data
+            .iter()
+            .all(|&b| b == 0 || b == b'\t' || b == b'\n' || b == b'\r' || (0x20..=0x7E).contains(&b))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1064,10 +1199,23 @@ mod tests {
 
     #[test]
     fn error_separator_warning() {
+        // An error separator is detected by its digest matching H(0x00000001),
+        // not by the event data value.  Build an event with the error digest.
+        let error_digest = crate::pcr::hash_bytes(HashAlgorithmId::Sha256, &1u32.to_le_bytes()).unwrap();
+
         let spec = spec_id_bytes(&[(0x000B, 32)]);
         let mut log = first_event_bytes(&spec);
-        // EV_SEPARATOR with error value 0xFFFFFFFF.
-        append_tcg2_event(&mut log, 0, 0x00000004, &[(0x000B, 32)], &[0xFF; 4]);
+
+        // EV_SEPARATOR with error digest and implementation-defined error data.
+        let mut ev = Vec::new();
+        ev.extend_from_slice(&0u32.to_le_bytes()); // pcr_index
+        ev.extend_from_slice(&4u32.to_le_bytes()); // EV_SEPARATOR
+        ev.extend_from_slice(&1u32.to_le_bytes()); // digest_count
+        ev.extend_from_slice(&0x000Bu16.to_le_bytes()); // SHA-256 alg
+        ev.extend_from_slice(&error_digest);             // H(0x00000001)
+        ev.extend_from_slice(&8u32.to_le_bytes()); // event_size (error info)
+        ev.extend_from_slice(&[0xEE; 8]);           // implementation-defined error data
+        log.extend_from_slice(&ev);
 
         let parsed = TcgLogParser::new().parse(&log).unwrap();
         assert!(
@@ -1075,6 +1223,23 @@ mod tests {
                 .warnings
                 .iter()
                 .any(|w| matches!(w, ParseWarning::ErrorSeparator { pcr_index: 0 }))
+        );
+    }
+
+    #[test]
+    fn alt_normal_separator_no_error_warning() {
+        // 0xFFFFFFFF is a valid alternative normal separator value per TCG PFP.
+        let spec = spec_id_bytes(&[(0x000B, 32)]);
+        let mut log = first_event_bytes(&spec);
+        append_tcg2_event(&mut log, 0, 0x00000004, &[(0x000B, 32)], &[0xFF; 4]);
+
+        let parsed = TcgLogParser::new().parse(&log).unwrap();
+        // Should NOT have ErrorSeparator warning — 0xFFFFFFFF is valid.
+        assert!(
+            !parsed.events[0]
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ParseWarning::ErrorSeparator { .. }))
         );
     }
 

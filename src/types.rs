@@ -201,6 +201,10 @@ pub enum EventType {
     NonhostInfo,
     /// `EV_OMIT_BOOT_DEVICE_EVENTS` (0x00000012) – Omit boot device events.
     OmitBootDeviceEvents,
+    /// `EV_POST_CODE2` (0x00000013) – POST code measurement v2.
+    PostCode2,
+    /// `EV_EFI_EVENT_BASE` (0x80000000) – Base for EFI event types.
+    EfiEventBase,
     /// `EV_EFI_VARIABLE_DRIVER_CONFIG` (0x80000001) – EFI variable (driver config).
     EfiVariableDriverConfig,
     /// `EV_EFI_VARIABLE_BOOT` (0x80000002) – EFI boot variable.
@@ -225,6 +229,8 @@ pub enum EventType {
     EfiHandoffTables2,
     /// `EV_EFI_VARIABLE_BOOT2` (0x8000000C) – EFI boot variable v2.
     EfiVariableBoot2,
+    /// `EV_EFI_GPT_EVENT2` (0x8000000D) – EFI GPT partition table event v2.
+    EfiGptEvent2,
     /// `EV_EFI_HCRTM_EVENT` (0x80000010) – EFI H-CRTM event.
     EfiHcrtmEvent,
     /// `EV_EFI_VARIABLE_AUTHORITY` (0x800000E0) – EFI variable authority.
@@ -233,6 +239,10 @@ pub enum EventType {
     EfiSpdmFirmwareBlob,
     /// `EV_EFI_SPDM_FIRMWARE_CONFIG` (0x800000E2) – EFI SPDM firmware config.
     EfiSpdmFirmwareConfig,
+    /// `EV_EFI_SPDM_DEVICE_POLICY` (0x800000E3) – EFI SPDM device policy.
+    EfiSpdmDevicePolicy,
+    /// `EV_EFI_SPDM_DEVICE_AUTHORITY` (0x800000E4) – EFI SPDM device authority.
+    EfiSpdmDeviceAuthority,
     /// An event type not recognised by this library.
     Unknown(u32),
 }
@@ -270,6 +280,8 @@ impl EventType {
             0x00000010 => Self::NonhostConfig,
             0x00000011 => Self::NonhostInfo,
             0x00000012 => Self::OmitBootDeviceEvents,
+            0x00000013 => Self::PostCode2,
+            0x80000000 => Self::EfiEventBase,
             0x80000001 => Self::EfiVariableDriverConfig,
             0x80000002 => Self::EfiVariableBoot,
             0x80000003 => Self::EfiBootServicesApplication,
@@ -282,10 +294,13 @@ impl EventType {
             0x8000000A => Self::EfiFirmwareBlob2,
             0x8000000B => Self::EfiHandoffTables2,
             0x8000000C => Self::EfiVariableBoot2,
+            0x8000000D => Self::EfiGptEvent2,
             0x80000010 => Self::EfiHcrtmEvent,
             0x800000E0 => Self::EfiVariableAuthority,
             0x800000E1 => Self::EfiSpdmFirmwareBlob,
             0x800000E2 => Self::EfiSpdmFirmwareConfig,
+            0x800000E3 => Self::EfiSpdmDevicePolicy,
+            0x800000E4 => Self::EfiSpdmDeviceAuthority,
             other => Self::Unknown(other),
         }
     }
@@ -321,6 +336,8 @@ impl EventType {
             Self::NonhostConfig => 0x00000010,
             Self::NonhostInfo => 0x00000011,
             Self::OmitBootDeviceEvents => 0x00000012,
+            Self::PostCode2 => 0x00000013,
+            Self::EfiEventBase => 0x80000000,
             Self::EfiVariableDriverConfig => 0x80000001,
             Self::EfiVariableBoot => 0x80000002,
             Self::EfiBootServicesApplication => 0x80000003,
@@ -333,10 +350,13 @@ impl EventType {
             Self::EfiFirmwareBlob2 => 0x8000000A,
             Self::EfiHandoffTables2 => 0x8000000B,
             Self::EfiVariableBoot2 => 0x8000000C,
+            Self::EfiGptEvent2 => 0x8000000D,
             Self::EfiHcrtmEvent => 0x80000010,
             Self::EfiVariableAuthority => 0x800000E0,
             Self::EfiSpdmFirmwareBlob => 0x800000E1,
             Self::EfiSpdmFirmwareConfig => 0x800000E2,
+            Self::EfiSpdmDevicePolicy => 0x800000E3,
+            Self::EfiSpdmDeviceAuthority => 0x800000E4,
             Self::Unknown(v) => v,
         }
     }
@@ -373,6 +393,8 @@ impl EventType {
             Self::NonhostConfig => "EV_NONHOST_CONFIG".to_string(),
             Self::NonhostInfo => "EV_NONHOST_INFO".to_string(),
             Self::OmitBootDeviceEvents => "EV_OMIT_BOOT_DEVICE_EVENTS".to_string(),
+            Self::PostCode2 => "EV_POST_CODE2".to_string(),
+            Self::EfiEventBase => "EV_EFI_EVENT_BASE".to_string(),
             Self::EfiVariableDriverConfig => "EV_EFI_VARIABLE_DRIVER_CONFIG".to_string(),
             Self::EfiVariableBoot => "EV_EFI_VARIABLE_BOOT".to_string(),
             Self::EfiBootServicesApplication => "EV_EFI_BOOT_SERVICES_APPLICATION".to_string(),
@@ -385,10 +407,13 @@ impl EventType {
             Self::EfiFirmwareBlob2 => "EV_EFI_PLATFORM_FIRMWARE_BLOB2".to_string(),
             Self::EfiHandoffTables2 => "EV_EFI_HANDOFF_TABLES2".to_string(),
             Self::EfiVariableBoot2 => "EV_EFI_VARIABLE_BOOT2".to_string(),
+            Self::EfiGptEvent2 => "EV_EFI_GPT_EVENT2".to_string(),
             Self::EfiHcrtmEvent => "EV_EFI_HCRTM_EVENT".to_string(),
             Self::EfiVariableAuthority => "EV_EFI_VARIABLE_AUTHORITY".to_string(),
             Self::EfiSpdmFirmwareBlob => "EV_EFI_SPDM_FIRMWARE_BLOB".to_string(),
             Self::EfiSpdmFirmwareConfig => "EV_EFI_SPDM_FIRMWARE_CONFIG".to_string(),
+            Self::EfiSpdmDevicePolicy => "EV_EFI_SPDM_DEVICE_POLICY".to_string(),
+            Self::EfiSpdmDeviceAuthority => "EV_EFI_SPDM_DEVICE_AUTHORITY".to_string(),
             Self::Unknown(v) => format!("Unknown({:#010x})", v),
         }
     }
@@ -422,6 +447,8 @@ impl From<String> for EventType {
             "EV_NONHOST_CONFIG" => Self::NonhostConfig,
             "EV_NONHOST_INFO" => Self::NonhostInfo,
             "EV_OMIT_BOOT_DEVICE_EVENTS" => Self::OmitBootDeviceEvents,
+            "EV_POST_CODE2" => Self::PostCode2,
+            "EV_EFI_EVENT_BASE" => Self::EfiEventBase,
             "EV_EFI_VARIABLE_DRIVER_CONFIG" => Self::EfiVariableDriverConfig,
             "EV_EFI_VARIABLE_BOOT" => Self::EfiVariableBoot,
             "EV_EFI_BOOT_SERVICES_APPLICATION" => Self::EfiBootServicesApplication,
@@ -434,10 +461,13 @@ impl From<String> for EventType {
             "EV_EFI_PLATFORM_FIRMWARE_BLOB2" => Self::EfiFirmwareBlob2,
             "EV_EFI_HANDOFF_TABLES2" => Self::EfiHandoffTables2,
             "EV_EFI_VARIABLE_BOOT2" => Self::EfiVariableBoot2,
+            "EV_EFI_GPT_EVENT2" => Self::EfiGptEvent2,
             "EV_EFI_HCRTM_EVENT" => Self::EfiHcrtmEvent,
             "EV_EFI_VARIABLE_AUTHORITY" => Self::EfiVariableAuthority,
             "EV_EFI_SPDM_FIRMWARE_BLOB" => Self::EfiSpdmFirmwareBlob,
             "EV_EFI_SPDM_FIRMWARE_CONFIG" => Self::EfiSpdmFirmwareConfig,
+            "EV_EFI_SPDM_DEVICE_POLICY" => Self::EfiSpdmDevicePolicy,
+            "EV_EFI_SPDM_DEVICE_AUTHORITY" => Self::EfiSpdmDeviceAuthority,
             other => {
                 // Try to recover the numeric value from "Unknown(0xXXXXXXXX)".
                 parse_unknown_u32(other).map_or(Self::Unknown(0), Self::Unknown)
