@@ -1541,6 +1541,21 @@ mod tests {
     }
 
     #[test]
+    fn container_event_serialises_event_type_before_data() {
+        // A container event (TrustBoundary) wrapping a simple event:
+        // the outer event must also have event_type before data in JSON.
+        let inner = sipa_entry(SIPAEVENT_BOOTDEBUGGING, &[0u8]);
+        let outer = sipa_entry(SIPAEVENT_TRUSTBOUNDARY, &inner);
+        let ev = WbclEventData::parse(&outer).unwrap();
+
+        let json = serde_json::to_string_pretty(&ev).unwrap();
+        let et_pos = json.find("\"event_type\"").expect("event_type missing");
+        let data_pos = json.find("\"data\"").expect("data missing");
+        assert!(et_pos < data_pos,
+            "event_type must come before data even for container events\n{json}");
+    }
+
+    #[test]
     fn parse_multiple_events_sequence() {
         let mut data = Vec::new();
         data.extend(sipa_entry(SIPAEVENT_BOOTDEBUGGING, &[0u8]));
@@ -1562,6 +1577,10 @@ mod tests {
 
         let ev = WbclEventData::parse(&data).unwrap();
         let json = serde_json::to_string_pretty(&ev).unwrap();
+        // event_type must appear before data in the serialised output
+        let et_pos = json.find("\"event_type\"").expect("event_type missing");
+        let data_pos = json.find("\"data\"").expect("data missing");
+        assert!(et_pos < data_pos, "event_type must come before data in JSON\n{json}");
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed["events"][0]["event_type"], "BootCounter");
