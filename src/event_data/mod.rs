@@ -562,6 +562,131 @@ fn parse_signature_lists(data: &[u8]) -> Option<Vec<EfiSignatureList>> {
     if lists.is_empty() { None } else { Some(lists) }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// EFI_LOAD_OPTION parsing  (Boot0000, Boot0001, …)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Decoded `EFI_LOAD_OPTION` structure (UEFI Spec §3.1.3).
+///
+/// Each `BootXXXX` UEFI variable stores one of these, describing a single
+/// entry in the system's boot menu.  The firmware measures them into PCR 1
+/// as `EV_EFI_VARIABLE_BOOT` events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EfiLoadOption {
+    /// Load option attributes.  Bit 0 (`LOAD_OPTION_ACTIVE`) indicates the
+    /// entry is enabled.  Bit 3 (`LOAD_OPTION_CATEGORY_APP`) marks it as
+    /// an application vs. driver.
+    pub attributes: u32,
+    /// Human-readable description of the boot entry (e.g. `"Windows Boot Manager"`).
+    pub description: String,
+    /// Decoded device path describing where the bootloader image lives.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path_list: Option<EfiDevicePath>,
+    /// Optional data appended after the device path, hex-encoded.
+    /// For Windows entries this typically contains BCD object data.
+    #[serde(skip_serializing_if = "is_empty_str")]
+    pub optional_data: String,
+}
+
+impl EfiLoadOption {
+    /// Try to decode an `EFI_LOAD_OPTION` from raw variable data bytes.
+    ///
+    /// Returns `None` if the data is too short or malformed.
+    fn try_parse(data: &[u8]) -> Option<Self> {
+        // Minimum: 4 (Attributes) + 2 (FilePathListLength) + 2 (one UTF-16 NUL)
+        if data.len() < 8 {
+            return None;
+        }
+
+        let attributes = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+        let file_path_list_length =
+            u16::from_le_bytes([data[4], data[5]]) as usize;
+
+        // Scan for the null-terminated UTF-16LE description string.
+        let desc_start = 6;
+        let mut desc_end = None;
+        let desc_region = &data[desc_start..];
+        // Walk through u16 code units looking for 0x0000 terminator.
+        let mut i = 0;
+        while i + 1 < desc_region.len() {
+            let ch = u16::from_le_bytes([desc_region[i], desc_region[i + 1]]);
+            if ch == 0 {
+                desc_end = Some(desc_start + i);
+                break;
+            }
+            i += 2;
+        }
+        let desc_end = desc_end?;
+
+        let desc_u16: Vec<u16> = data[desc_start..desc_end]
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let description = String::from_utf16(&desc_u16).ok()?;
+
+        // The file path list starts right after the null terminator.
+        let fp_start = desc_end + 2; // skip the 2-byte null
+        let fp_end = fp_start + file_path_list_length;
+
+        let file_path_list = if fp_end <= data.len() && file_path_list_length > 0 {
+            EfiDevicePath::parse(&data[fp_start..fp_end])
+        } else {
+            None
+        };
+
+        let optional_data = if fp_end < data.len() {
+            to_hex(&data[fp_end..])
+        } else {
+            String::new()
+        };
+
+        Some(Self {
+            attributes,
+            description,
+            file_path_list,
+            optional_data,
+        })
+    }
+}
+
+/// Decoded `BootOrder` variable — an ordered list of `u16` boot option indices.
+///
+/// The `BootOrder` UEFI variable is simply an array of `UINT16` values, each
+/// corresponding to a `BootXXXX` variable.  The firmware tries them in order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BootOrder {
+    /// The boot option indices in priority order
+    /// (e.g. `[0, 1, 2, 3]` means try `Boot0000` first, then `Boot0001`, …).
+    pub order: Vec<u16>,
+}
+
+impl BootOrder {
+    /// Try to decode a `BootOrder` variable from raw bytes.
+    fn try_parse(data: &[u8]) -> Option<Self> {
+        if data.is_empty() || data.len() % 2 != 0 {
+            return None;
+        }
+        let order: Vec<u16> = data
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        Some(Self { order })
+    }
+}
+
+/// Returns `true` if the variable name matches `Boot[0-9A-Fa-f]{4}`.
+fn is_boot_entry_name(name: &str) -> bool {
+    if name.len() != 8 {
+        return false;
+    }
+    let (prefix, suffix) = name.split_at(4);
+    prefix == "Boot" && suffix.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// UEFI variable event data
+// ──────────────────────────────────────────────────────────────────────────────
+
 /// Event data for EFI variable events
 /// (`EV_EFI_VARIABLE_DRIVER_CONFIG`, `EV_EFI_VARIABLE_BOOT`,
 /// `EV_EFI_VARIABLE_AUTHORITY`).
@@ -590,6 +715,14 @@ pub struct UefiVariableData {
     /// `None` when `variable_data` is not a signature-list structure.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature_list: Option<Vec<EfiSignatureList>>,
+    /// Decoded `EFI_LOAD_OPTION` for `BootXXXX` variables.
+    /// `None` for all other UEFI variable events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub load_option: Option<EfiLoadOption>,
+    /// Decoded `BootOrder` variable (ordered list of boot option indices).
+    /// `None` for all other UEFI variable events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub boot_order: Option<BootOrder>,
 }
 
 // Helper: is the variable_data field worth emitting?  It's redundant (and
@@ -663,11 +796,35 @@ impl UefiVariableData {
             None
         };
 
-        // (3) Raw hex fallback — only for variables that couldn't be decoded
-        //     above (SecureBoot, BootOrder, Boot0000, …).  Skipping this for
-        //     the decoded cases avoids ~8000 tiny allocs for the 8 KB dbx blob
-        //     and hundreds more for db / KEK / PK.
-        let variable_data = if certificate_info.is_none() && signature_list.is_none() {
+        // (3) EFI_LOAD_OPTION (Boot0000, Boot0001, …) or BootOrder.
+        let load_option = if signature_list.is_none()
+            && certificate_info.is_none()
+            && is_boot_entry_name(&unicode_name)
+        {
+            EfiLoadOption::try_parse(var_data)
+        } else {
+            None
+        };
+
+        let boot_order = if signature_list.is_none()
+            && certificate_info.is_none()
+            && load_option.is_none()
+            && unicode_name == "BootOrder"
+        {
+            BootOrder::try_parse(var_data)
+        } else {
+            None
+        };
+
+        // (4) Raw hex fallback — only for variables that couldn't be decoded
+        //     above.  Skipping this for the decoded cases avoids ~8000 tiny
+        //     allocs for the 8 KB dbx blob and hundreds more for
+        //     db / KEK / PK.
+        let all_none = certificate_info.is_none()
+            && signature_list.is_none()
+            && load_option.is_none()
+            && boot_order.is_none();
+        let variable_data = if all_none {
             to_hex(var_data)
         } else {
             String::new()
@@ -679,6 +836,8 @@ impl UefiVariableData {
             variable_data,
             certificate_info,
             signature_list,
+            load_option,
+            boot_order,
         })
     }
 }

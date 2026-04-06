@@ -107,12 +107,12 @@ pub mod warning;
 pub use error::ParseError;
 pub use event::{DigestValue, EventData, TcgLog, TcgPcrEvent, TcgPcrEvent2};
 pub use event_data::{
-    AlgorithmSize, CertificateInfo, EfiConfigurationTable, EfiGptData, EfiSignatureEntry,
-    EfiSignatureList, GptHeader, GptPartitionEntry, HcrtmComponentEvent, SpecIdEvent,
-    SpecIdEvent00, SpecIdEvent02, Sp800155Event, Sp800155Event2, Sp800155Event3,
-    StartupLocality, TaggedEvent, UefiFirmwareBlob, UefiFirmwareBlob2, UefiHandoffTables,
-    UefiHandoffTables2, UefiImageLoadEvent, UefiVariableData, WbclEventData,
-    EfiDevicePath,
+    AlgorithmSize, BootOrder, CertificateInfo, EfiConfigurationTable, EfiGptData,
+    EfiLoadOption, EfiSignatureEntry, EfiSignatureList, GptHeader, GptPartitionEntry,
+    HcrtmComponentEvent, SpecIdEvent, SpecIdEvent00, SpecIdEvent02, Sp800155Event,
+    Sp800155Event2, Sp800155Event3, StartupLocality, TaggedEvent, UefiFirmwareBlob,
+    UefiFirmwareBlob2, UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent,
+    UefiVariableData, WbclEventData, EfiDevicePath,
 };
 pub use event_data::device_path::DevicePathNode;
 pub use event_data::wbcl::{
