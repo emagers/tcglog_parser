@@ -582,10 +582,90 @@ pub struct EfiLoadOption {
     /// Decoded device path describing where the bootloader image lives.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_path_list: Option<EfiDevicePath>,
-    /// Optional data appended after the device path, hex-encoded.
-    /// For Windows entries this typically contains BCD object data.
+    /// Decoded Windows-specific optional data (present when the optional
+    /// data starts with the `"WINDOWS\0"` ASCII magic).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub windows_options: Option<WindowsBootOptions>,
+    /// Raw optional data appended after the device path, hex-encoded.
+    /// Omitted when `windows_options` was successfully decoded, or when
+    /// there is no optional data at all.
     #[serde(skip_serializing_if = "is_empty_str")]
     pub optional_data: String,
+}
+
+/// Decoded Windows-specific optional data from a `BootXXXX` load option.
+///
+/// When Windows creates a boot entry via `bcdboot.exe` or the installer,
+/// the `OptionalData` portion of the `EFI_LOAD_OPTION` starts with the
+/// ASCII magic `"WINDOWS\0"` followed by a version, size fields, and a
+/// null-terminated UTF-16LE `BCDOBJECT={GUID}` string that identifies the
+/// BCD object the boot manager should load its configuration from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WindowsBootOptions {
+    /// Format version (observed value: `1`).
+    pub version: u32,
+    /// The BCD object reference string, e.g.
+    /// `"BCDOBJECT={9dea862c-5cdd-4e70-acc1-f32b344d4795}"`.
+    ///
+    /// The GUID `{9dea862c-…}` is the well-known identifier for the
+    /// Windows Boot Manager (`{bootmgr}` in `bcdedit.exe` output).
+    pub bcd_object: String,
+}
+
+impl WindowsBootOptions {
+    /// Windows optional-data magic: `"WINDOWS\0"` in ASCII (8 bytes).
+    const MAGIC: &[u8; 8] = b"WINDOWS\0";
+
+    /// Try to decode a `WindowsBootOptions` from the raw optional-data
+    /// bytes of an `EFI_LOAD_OPTION`.
+    ///
+    /// Returns `None` if the data doesn't start with the expected magic
+    /// or is too short to contain the required fields.
+    fn try_parse(data: &[u8]) -> Option<Self> {
+        // Layout:
+        //   0x00  [8]  "WINDOWS\0"  (ASCII magic)
+        //   0x08  u32  version
+        //   0x0C  u32  total_length  (of everything after magic)
+        //   0x10  u32  data_length
+        //   0x14  ...  UTF-16LE null-terminated BCDOBJECT string
+        //   ...   trailing BCD element data (undocumented, not parsed)
+        if data.len() < 0x16 || &data[..8] != Self::MAGIC {
+            return None;
+        }
+
+        let version = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+        // Skip total_length (0x0C) and data_length (0x10) — we find
+        // the string end by scanning for the null terminator instead.
+
+        let str_start = 0x14;
+        let str_region = &data[str_start..];
+
+        // Scan for the UTF-16LE null terminator.
+        let mut str_end = None;
+        let mut i = 0;
+        while i + 1 < str_region.len() {
+            let ch = u16::from_le_bytes([str_region[i], str_region[i + 1]]);
+            if ch == 0 {
+                str_end = Some(i);
+                break;
+            }
+            i += 2;
+        }
+        let str_end = str_end?;
+
+        let bcd_u16: Vec<u16> = str_region[..str_end]
+            .chunks_exact(2)
+            .map(|b| u16::from_le_bytes([b[0], b[1]]))
+            .collect();
+        let bcd_object = String::from_utf16(&bcd_u16).ok()?;
+
+        // Sanity-check: the string should start with "BCDOBJECT="
+        if !bcd_object.starts_with("BCDOBJECT=") {
+            return None;
+        }
+
+        Some(Self { version, bcd_object })
+    }
 }
 
 impl EfiLoadOption {
@@ -634,8 +714,16 @@ impl EfiLoadOption {
             None
         };
 
-        let optional_data = if fp_end < data.len() {
-            to_hex(&data[fp_end..])
+        let opt_raw = if fp_end < data.len() {
+            &data[fp_end..]
+        } else {
+            &[] as &[u8]
+        };
+
+        let windows_options = WindowsBootOptions::try_parse(opt_raw);
+
+        let optional_data = if windows_options.is_none() && !opt_raw.is_empty() {
+            to_hex(opt_raw)
         } else {
             String::new()
         };
@@ -644,6 +732,7 @@ impl EfiLoadOption {
             attributes,
             description,
             file_path_list,
+            windows_options,
             optional_data,
         })
     }
@@ -1702,10 +1791,13 @@ impl HcrtmComponentEvent {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Read a `UINTN` value (4 or 8 bytes, little-endian) from a cursor.
+///
+/// Accepts both raw byte counts (`4` or `8`) and the TCG spec's
+/// enumerated encoding (`1` → `sizeof(UINT32)`, `2` → `sizeof(UINT64)`).
 pub(crate) fn read_uintn(c: &mut Cursor<'_>, uintn_size: u8) -> Result<u64, ParseError> {
     match uintn_size {
-        4 => Ok(c.read_u32_le()? as u64),
-        8 => c.read_u64_le(),
+        1 | 4 => Ok(c.read_u32_le()? as u64),
+        2 | 8 => c.read_u64_le(),
         _ => Err(ParseError::UnsupportedValue {
             field: "uintn_size",
             value: uintn_size as u64,

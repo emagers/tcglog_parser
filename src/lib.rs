@@ -112,7 +112,7 @@ pub use event_data::{
     HcrtmComponentEvent, SpecIdEvent, SpecIdEvent00, SpecIdEvent02, Sp800155Event,
     Sp800155Event2, Sp800155Event3, StartupLocality, TaggedEvent, UefiFirmwareBlob,
     UefiFirmwareBlob2, UefiHandoffTables, UefiHandoffTables2, UefiImageLoadEvent,
-    UefiVariableData, WbclEventData, EfiDevicePath,
+    UefiVariableData, WbclEventData, WindowsBootOptions, EfiDevicePath,
 };
 pub use event_data::device_path::DevicePathNode;
 pub use event_data::wbcl::{

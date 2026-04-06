@@ -662,6 +662,32 @@ fn parse_builtin_event_data(
             EventData::Json(serde_json::json!({ "info": text }))
         }
 
+        // EV_CPU_MICROCODE: typically a null-terminated ASCII description
+        // like "CPU Microcode\0".
+        EventType::CpuMicrocode => {
+            let text = String::from_utf8_lossy(data)
+                .trim_matches('\0')
+                .to_string();
+            if is_printable_ascii(text.as_bytes()) && !text.is_empty() {
+                EventData::Json(serde_json::json!({ "description": text }))
+            } else {
+                EventData::Json(raw_hex(data))
+            }
+        }
+
+        // EV_PLATFORM_CONFIG_FLAGS: typically ASCII key=value strings like
+        // "FeatureTME=0".
+        EventType::PlatformConfigFlags => {
+            let text = String::from_utf8_lossy(data)
+                .trim_matches('\0')
+                .to_string();
+            if is_printable_ascii(text.as_bytes()) && !text.is_empty() {
+                EventData::Json(serde_json::json!({ "config": text }))
+            } else {
+                EventData::Json(raw_hex(data))
+            }
+        }
+
         // EV_EFI_HCRTM_EVENT: should contain the string "HCRTM".
         EventType::EfiHcrtmEvent => {
             let text = String::from_utf8_lossy(data).into_owned();
