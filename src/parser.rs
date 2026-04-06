@@ -359,7 +359,9 @@ impl TcgLogParser {
             self.handle_separator(pcr_index, &event_bytes, &digests, err_sep_digests, pcr_state, &mut warnings);
         } else if event_type != EventType::NoAction {
             // Non-separator, non-no-action: check for post-cap and suspicious digests.
-            if pcr_index <= MAX_PCR_INDEX && pcr_state.is_capped(pcr_index) {
+            if pcr_index <= MAX_PCR_INDEX && pcr_state.is_capped(pcr_index)
+                && !is_expected_post_separator(event_type, pcr_index)
+            {
                 warnings.push(ParseWarning::PostCapMeasurement { pcr_index });
             }
 
@@ -476,6 +478,60 @@ impl TcgLogParser {
 impl Default for TcgLogParser {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Post-separator event classification
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Returns `true` if this (`event_type`, `pcr_index`) combination is expected
+/// to appear **after** the `EV_SEPARATOR` per the TCG PC Client PFP spec.
+///
+/// The spec defines a two-phase measurement model:
+/// - **Pre-separator:** firmware self-measurements and configuration.
+/// - **Post-separator:** boot application loading, verification, and OS handoff.
+///
+/// The following post-separator events are explicitly defined in the spec:
+///
+/// | PCR | Event type(s) |
+/// |-----|--------------|
+/// | 2   | `EV_EFI_BOOT_SERVICES_DRIVER`, `EV_EFI_RUNTIME_SERVICES_DRIVER` |
+/// | 4   | `EV_EFI_ACTION`, `EV_EFI_BOOT_SERVICES_APPLICATION` |
+/// | 5   | `EV_EFI_GPT_EVENT`, `EV_EFI_ACTION` |
+/// | 7   | `EV_EFI_VARIABLE_AUTHORITY` |
+/// | 12–14 | `EV_EVENT_TAG` (Windows WBCL/SIPA events), `EV_COMPACT_HASH`, `EV_SEPARATOR` |
+///
+/// Additionally, `EV_PLATFORM_CONFIG_FLAGS` on PCR 1 is commonly emitted
+/// post-separator by OEM firmware and is treated as expected.
+fn is_expected_post_separator(event_type: EventType, pcr_index: u32) -> bool {
+    match (event_type, pcr_index) {
+        // PCR 2: drivers loaded during boot
+        (EventType::EfiBootServicesDriver, 2)
+        | (EventType::EfiRuntimeServicesDriver, 2) => true,
+
+        // PCR 4: boot application lifecycle
+        (EventType::EfiAction, 4)
+        | (EventType::EfiBootServicesApplication, 4) => true,
+
+        // PCR 5: GPT measurement + Exit Boot Services action
+        (EventType::EfiGptEvent, 5)
+        | (EventType::EfiGptEvent2, 5)
+        | (EventType::EfiAction, 5) => true,
+
+        // PCR 7: Secure Boot verification authority
+        (EventType::EfiVariableAuthority, 7) => true,
+
+        // PCR 1: OEM platform config (common post-separator in practice)
+        (EventType::PlatformConfigFlags, 1) => true,
+
+        // PCR 12–14: Windows WBCL/SIPA events and compact hashes are always
+        // post-separator (these PCRs receive their separators from the OS
+        // loader, not from firmware).
+        (EventType::EventTag, 12..=14)
+        | (EventType::CompactHash, 11..=14) => true,
+
+        _ => false,
     }
 }
 
