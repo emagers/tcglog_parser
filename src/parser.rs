@@ -136,6 +136,7 @@ pub trait EventDataParser: Send + Sync {
 /// ```
 pub struct TcgLogParser {
     custom_parsers: Vec<Box<dyn EventDataParser>>,
+    max_events: usize,
 }
 
 impl TcgLogParser {
@@ -151,6 +152,7 @@ impl TcgLogParser {
     pub fn new() -> Self {
         Self {
             custom_parsers: Vec::new(),
+            max_events: 100_000,
         }
     }
 
@@ -176,6 +178,15 @@ impl TcgLogParser {
     /// ```
     pub fn with_parser(mut self, parser: Box<dyn EventDataParser>) -> Self {
         self.custom_parsers.push(parser);
+        self
+    }
+
+    /// Sets the maximum number of events the parser will process.
+    ///
+    /// If the log contains more events than this limit, parsing stops with
+    /// a [`ParseError::TooManyEvents`] error. The default is 100,000.
+    pub fn with_max_events(mut self, max: usize) -> Self {
+        self.max_events = max;
         self
     }
 
@@ -253,6 +264,11 @@ impl TcgLogParser {
 
             // Parse remaining events in TCG 2.0 format.
             while !cursor.is_empty() {
+                if events.len() >= self.max_events {
+                    return Err(ParseError::TooManyEvents {
+                        limit: self.max_events,
+                    });
+                }
                 let ev = self.parse_tcg2_event(
                     &mut cursor,
                     &alg_map,
@@ -269,6 +285,11 @@ impl TcgLogParser {
         } else {
             // TCG 1.2-only log: parse remaining events in TCG 1.2 format.
             while !cursor.is_empty() {
+                if legacy_events.len() >= self.max_events {
+                    return Err(ParseError::TooManyEvents {
+                        limit: self.max_events,
+                    });
+                }
                 legacy_events.push(parse_tcg1_event(&mut cursor)?);
             }
         }

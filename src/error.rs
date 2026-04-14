@@ -45,6 +45,13 @@ pub enum ParseError {
         /// Description from the custom parser.
         message: String,
     },
+
+    /// The event log exceeds the configured maximum event count.
+    #[error("Event log exceeds maximum event count ({limit})")]
+    TooManyEvents {
+        /// The configured limit that was exceeded.
+        limit: usize,
+    },
 }
 
 impl ParseError {
